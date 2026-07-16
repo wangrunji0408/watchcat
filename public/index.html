@@ -201,38 +201,45 @@ function renderActivity(messages, start, sessionFile) {
   const activity = expandable('details', 'activity', key);
   const calls = [];
   const byId = new Map();
-  const thoughts = [];
+  const rows = [];
 
-  for (const m of messages) {
+  messages.forEach((m, timelineIndex) => {
     if (m.role === 'thinking') {
-      thoughts.push(m);
+      rows.push({ type: 'thought', message: m, timelineIndex });
     } else if (m.role === 'tool_use') {
-      const call = { use: m, results: [] };
+      const call = { use: m, results: [], timelineIndex };
       calls.push(call);
+      rows.push({ type: 'tool', call, timelineIndex });
       if (m.callId) byId.set(m.callId, call);
     } else if (m.role === 'tool_result') {
       let call = m.callId && byId.get(m.callId);
       if (!call) call = calls.find(c => c.results.length === 0);
-      if (!call) { call = { use: null, results: [] }; calls.push(call); }
+      if (!call) {
+        call = { use: null, results: [], timelineIndex };
+        rows.push({ type: 'tool', call, timelineIndex });
+      }
       call.results.push(m);
     }
-  }
+  });
 
   const label = calls.length ? '调用了 ' + calls.length + ' 次工具' : '思考';
   activity.appendChild(el('summary', null, label));
   const list = el('div', 'activity-list');
 
-  thoughts.forEach((m, i) => {
-    const thought = expandable('details', 'thought-item', key + ':thought:' + i);
-    thought.appendChild(el('summary', null, '思考' + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
-    const detail = el('div', 'tool-detail');
-    detail.appendChild(el('div', 'tool-detail-value', m.text));
-    thought.appendChild(detail);
-    list.appendChild(thought);
-  });
+  rows.forEach(row => {
+    if (row.type === 'thought') {
+      const m = row.message;
+      const thought = expandable('details', 'thought-item', key + ':thought:' + row.timelineIndex);
+      thought.appendChild(el('summary', null, '思考' + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
+      const detail = el('div', 'tool-detail');
+      detail.appendChild(el('div', 'tool-detail-value', m.text));
+      thought.appendChild(detail);
+      list.appendChild(thought);
+      return;
+    }
 
-  calls.forEach((call, i) => {
-    const item = expandable('details', 'tool-item', key + ':tool:' + i);
+    const call = row.call;
+    const item = expandable('details', 'tool-item', key + ':tool:' + row.timelineIndex);
     const name = call.use ? toolName(call.use) : (call.results[0] && toolName(call.results[0])) || '工具结果';
     item.appendChild(el('summary', null, name + (call.use && call.use.ts ? ' · ' + fmtTime(call.use.ts) : '')));
     const detail = el('div', 'tool-detail');
