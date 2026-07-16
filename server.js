@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Watchcat: 局域网可访问的 Claude Code / Codex 会话日志监控服务
-// 零依赖,直接 `node server.js` 启动
+// 安装依赖后可直接 `node server.js` 启动
 
 const http = require('http');
 const fs = require('fs');
@@ -15,6 +15,7 @@ const CODEX_DIR = path.join(HOME, '.codex', 'sessions');
 const HERMES_DB = path.join(HOME, '.hermes', 'state.db');
 const HERMES_PID_FILE = path.join(HOME, '.hermes', 'gateway.pid');
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const MARKED_BROWSER_FILE = require.resolve('marked/marked.min.js');
 const REMOTE_CACHE_MS = parseInt(process.env.WATCHCAT_REMOTE_CACHE_MS || '5000', 10);
 const REMOTE_MAX_FILES = parseInt(process.env.WATCHCAT_REMOTE_MAX_FILES || '10', 10);
 const REMOTE_READ_CONCURRENCY = parseInt(process.env.WATCHCAT_REMOTE_READ_CONCURRENCY || '4', 10);
@@ -697,6 +698,11 @@ const server = http.createServer(async (req, res) => {
       const data = apiSessionDetail(url.searchParams);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(data));
+      return;
+    }
+    if (url.pathname === '/vendor/marked.min.js') {
+      res.writeHead(200, { 'Content-Type': MIME['.js'], 'Cache-Control': 'public, max-age=86400' });
+      res.end(fs.readFileSync(MARKED_BROWSER_FILE));
       return;
     }
     // 静态文件
