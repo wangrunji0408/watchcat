@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Watchcat · Agent 会话监控</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1e2230; --border: #2a2f3f;
+    --text: #d8dce8; --dim: #8a91a5; --accent: #7aa2f7;
+    --green: #9ece6a; --yellow: #e0af68; --gray: #565f89;
+    --claude: #d97757; --codex: #e8e8ec; --hermes: #bb9af7;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  header { display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  header h1 { font-size: 17px; margin: 0; white-space: nowrap; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  header .spacer { flex: 1; }
+  .layout { display: flex; height: calc(100vh - 55px - env(safe-area-inset-top)); }
+  .sidebar { width: 460px; min-width: 320px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    border-right: 1px solid var(--border); padding: 12px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 16px 24px;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+
+  .project { margin-bottom: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .project.hot { border-color: #3d5a3d; }
+  .project-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; user-select: none; }
+  .project-head:hover { background: var(--panel2); }
+  .project-name { font-weight: 600; word-break: break-all; }
+  .project-meta { margin-left: auto; color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .chevron { color: var(--dim); font-size: 11px; transition: transform .15s; }
+  .project.collapsed .chevron { transform: rotate(-90deg); }
+  .project.collapsed .session-list { display: none; }
+
+  .session { display: flex; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--border); cursor: pointer; align-items: flex-start; }
+  .session:hover { background: var(--panel2); }
+  .session.active { background: #23283a; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; flex-shrink: 0; }
+  .dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 1.5s infinite; }
+  .dot.open { background: var(--yellow); }
+  .dot.idle { background: var(--gray); }
+  @keyframes pulse { 50% { opacity: .4; } }
+  .session-body { min-width: 0; flex: 1; }
+  .session-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-sub { color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-proj { color: var(--accent); }
+  .ctx { color: var(--accent); }
+  .logo { width: 18px; height: 18px; flex-shrink: 0; margin-top: 2px; opacity: .9; }
+
+  .msg { margin-bottom: 12px; max-width: 900px; }
+  .msg .meta { font-size: 11px; color: var(--dim); margin-bottom: 3px; }
+  .msg .bubble { padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user .bubble { background: #26314a; border: 1px solid #35476b; }
+  .msg.assistant .bubble { background: var(--panel); border: 1px solid var(--border); }
+  .msg.thinking .bubble, .msg.tool_use .bubble, .msg.tool_result .bubble {
+    background: transparent; border: 1px dashed var(--border); color: var(--dim); font-size: 12.5px;
+    font-family: ui-monospace, Menlo, monospace; }
+  .msg.divider { color: var(--accent); font-size: 12px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  .empty { color: var(--dim); text-align: center; margin-top: 15vh; }
+  .legend { display: flex; gap: 12px; font-size: 12px; color: var(--dim); align-items: center; }
+  .legend .dot { margin-top: 0; }
+  .detail-head { position: sticky; top: -16px; background: var(--bg); padding: 8px 0; margin: -8px 0 12px;
+    border-bottom: 1px solid var(--border); font-size: 13px; color: var(--dim); word-break: break-all;
+    display: flex; gap: 10px; align-items: flex-start; z-index: 2; }
+  .back-btn { display: none; flex-shrink: 0; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; font-size: 14px; cursor: pointer; }
+  label.toggle { font-size: 12px; color: var(--dim); cursor: pointer; user-select: none; white-space: nowrap; }
+
+  @media (max-width: 800px) {
+    header { flex-wrap: wrap; gap: 6px 10px; padding: 8px 12px; padding-top: calc(8px + env(safe-area-inset-top)); }
+    .legend .txt { display: none; }
+    .layout { display: block; height: auto; }
+    .sidebar { width: 100%; min-width: 0; border-right: none; }
+    /* 详情页改为全屏覆盖层 */
+    .main { display: none; }
+    body.detail-open { overflow: hidden; }
+    body.detail-open .main { display: block; position: fixed; inset: 0; z-index: 20; background: var(--bg);
+      padding: 12px 14px; padding-top: calc(12px + env(safe-area-inset-top));
+      padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+    .detail-head { top: calc(-12px - env(safe-area-inset-top)); padding-top: calc(8px + env(safe-area-inset-top)); }
+    .back-btn { display: block; }
+    .session { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🐈 Watchcat</h1>
+  <span class="sub" id="stats"></span>
+  <div class="spacer"></div>
+  <div class="legend">
+    <span class="dot running"></span><span class="txt">运行中</span>
+    <span class="dot open"></span><span class="txt">存活</span>
+    <span class="dot idle"></span><span class="txt">空闲</span>
+    <label class="toggle"><input type="checkbox" id="showDetailNoise"> 工具/思考</label>
+  </div>
+</header>
+<div class="layout">
+  <div class="sidebar" id="sidebar"><div class="empty">加载中…</div></div>
+  <div class="main" id="main"><div class="empty">选择左侧会话查看日志</div></div>
+</div>
+<script>
+const state = { activeFile: null, collapsed: new Set(), data: null };
+
+// ---------- 各来源 logo (内嵌 SVG 近似图形) ----------
+const LOGOS = {
+  // Claude: 橙色放射星标
+  claude: (() => {
+    let rays = '';
+    for (let i = 0; i < 12; i++) {
+      rays += '<path d="M12 3.2 L13 10.6 L12 12 L11 10.6 Z" transform="rotate(' + i * 30 + ' 12 12)"/>';
+    }
+    return '<svg class="logo" viewBox="0 0 24 24" fill="#d97757">' + rays + '</svg>';
+  })(),
+  // Codex (OpenAI): 六瓣旋花
+  codex: (() => {
+    let petals = '';
+    for (let i = 0; i < 6; i++) {
+      petals += '<rect x="10.9" y="2.2" width="2.6" height="11.2" rx="1.3" transform="rotate(' + (i * 60 + 14) + ' 12 12)"/>';
+    }
+    return '<svg class="logo" viewBox="0 0 24 24" fill="#e8e8ec">' + petals + '</svg>';
+  })(),
+  // Hermes: 紫色羽翼
+  hermes: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#bb9af7" stroke-width="1.8" stroke-linecap="round">' +
+    '<path d="M20.5 5.5 C14 5.5 9.5 9.5 7.5 16.5"/>' +
+    '<path d="M20 9 C15.5 9 11.5 12 10 16.5"/>' +
+    '<path d="M19.5 12.5 C16.5 12.5 13.5 14.5 12.5 16.5"/>' +
+    '<path d="M4 16.5 H14"/></svg>',
+};
+const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes' };
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts), now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const hm = d.toTimeString().slice(0, 5);
+  if (sameDay) return hm;
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm;
+}
+function fmtAge(ts) {
+  if (!ts) return '';
+  const s = (Date.now() - Date.parse(ts)) / 1000;
+  if (s < 60) return Math.floor(s) + ' 秒前';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+function fmtK(n) {
+  if (n == null) return '';
+  return n >= 1000 ? Math.round(n / 1000) + 'K' : String(n);
+}
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/sessions');
+    state.data = await res.json();
+    renderSidebar();
+  } catch (e) {
+    document.getElementById('stats').textContent = '刷新失败: ' + e.message;
+  }
+}
+
+function projShort(project) {
+  return project.split('/').filter(Boolean).pop() || project;
+}
+
+function sessionRow(s, showProject) {
+  const row = el('div', 'session' + (s.file === state.activeFile ? ' active' : ''));
+  row.appendChild(el('span', 'dot ' + s.status));
+  const body = el('div', 'session-body');
+  body.appendChild(el('div', 'session-title', s.title));
+  const sub = el('div', 'session-sub');
+  const parts = [];
+  if (showProject) {
+    const p = el('span', 'session-proj', projShort(s.project));
+    sub.appendChild(p);
+    sub.appendChild(document.createTextNode(' · '));
+  }
+  sub.appendChild(document.createTextNode(fmtTime(s.lastTs) + ' · ' + s.turns + ' 轮'));
+  if (s.contextTokens != null) {
+    sub.appendChild(document.createTextNode(' · '));
+    sub.appendChild(el('span', 'ctx', fmtK(s.contextTokens) + ' ctx'));
+  }
+  if (s.gitBranch) sub.appendChild(document.createTextNode(' · ' + s.gitBranch));
+  if (s.lastMessage) sub.appendChild(document.createTextNode(' · ' + s.lastMessage));
+  body.appendChild(sub);
+  row.appendChild(body);
+  const logoWrap = el('span');
+  logoWrap.innerHTML = LOGOS[s.source] || '';
+  logoWrap.title = SRC_NAMES[s.source] || s.source;
+  row.appendChild(logoWrap.firstChild || logoWrap);
+  row.onclick = () => openSession(s);
+  return row;
+}
+
+function renderSidebar() {
+  const { projects } = state.data;
+  const sb = document.getElementById('sidebar');
+  sb.innerHTML = '';
+  let total = 0, running = 0;
+  const active = [];
+  for (const p of projects) {
+    total += p.sessions.length;
+    for (const s of p.sessions) {
+      if (s.status === 'running') { running++; active.push(s); }
+    }
+  }
+  // 顶部: 运行中会话,按最近活动降序
+  if (active.length) {
+    active.sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
+    const box = el('div', 'project hot' + (state.collapsed.has('##active') ? ' collapsed' : ''));
+    const head = el('div', 'project-head');
+    head.appendChild(el('span', 'chevron', '▼'));
+    const name = el('span', 'project-name', '运行中');
+    name.style.color = 'var(--green)';
+    head.appendChild(name);
+    head.appendChild(el('span', 'project-meta', running + ' 运行'));
+    head.onclick = () => { toggleGroup('##active'); box.classList.toggle('collapsed'); };
+    box.appendChild(head);
+    const list = el('div', 'session-list');
+    for (const s of active) list.appendChild(sessionRow(s, true));
+    box.appendChild(list);
+    sb.appendChild(box);
+  }
+  // 项目分组
+  for (const p of projects) {
+    const box = el('div', 'project' + (state.collapsed.has(p.project) ? ' collapsed' : ''));
+    const head = el('div', 'project-head');
+    head.appendChild(el('span', 'chevron', '▼'));
+    head.appendChild(el('span', 'project-name', p.name));
+    const meta = el('span', 'project-meta',
+      (p.running ? '● ' + p.running + ' · ' : '') + p.sessions.length + ' 会话 · ' + fmtAge(p.lastTs));
+    if (p.running) meta.style.color = 'var(--green)';
+    head.appendChild(meta);
+    head.onclick = () => { toggleGroup(p.project); box.classList.toggle('collapsed'); };
+    box.appendChild(head);
+    const list = el('div', 'session-list');
+    for (const s of p.sessions) list.appendChild(sessionRow(s, false));
+    box.appendChild(list);
+    sb.appendChild(box);
+  }
+  if (!projects.length) sb.appendChild(el('div', 'empty', '没有找到任何会话日志'));
+  document.getElementById('stats').textContent =
+    projects.length + ' 项目 · ' + total + ' 会话' + (running ? ' · ' + running + ' 运行中' : '');
+}
+
+function toggleGroup(key) {
+  state.collapsed.has(key) ? state.collapsed.delete(key) : state.collapsed.add(key);
+}
+
+function closeDetail() {
+  document.body.classList.remove('detail-open');
+  state.activeFile = null;
+  renderSidebar();
+}
+
+async function openSession(s, keepScroll) {
+  state.activeFile = s.file;
+  renderSidebar();
+  document.body.classList.add('detail-open');
+  const main = document.getElementById('main');
+  const wasAtBottom = keepScroll && main.scrollHeight - main.scrollTop - main.clientHeight < 80;
+  if (!keepScroll) main.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const res = await fetch('/api/session?file=' + encodeURIComponent(s.file));
+    const data = await res.json();
+    if (state.activeFile !== s.file) return; // 用户已切换
+    main.innerHTML = '';
+    const head = el('div', 'detail-head');
+    const back = el('button', 'back-btn', '‹ 返回');
+    back.onclick = closeDetail;
+    head.appendChild(back);
+    head.appendChild(el('span', null, (SRC_NAMES[s.source] || s.source) + ' · ' + s.title +
+      (s.contextTokens != null ? ' · ' + fmtK(s.contextTokens) + ' ctx' : '')));
+    main.appendChild(head);
+    const showNoise = document.getElementById('showDetailNoise').checked;
+    const roleNames = { user: '用户', assistant: '助手', thinking: '思考', tool_use: '工具调用', tool_result: '工具结果' };
+    for (const m of data.messages) {
+      if (!showNoise && (m.role === 'thinking' || m.role === 'tool_use' || m.role === 'tool_result')) continue;
+      const box = el('div', 'msg ' + m.role);
+      if (m.role === 'divider') { box.textContent = m.text; main.appendChild(box); continue; }
+      box.appendChild(el('div', 'meta', (roleNames[m.role] || m.role) + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
+      box.appendChild(el('div', 'bubble', m.text));
+      main.appendChild(box);
+    }
+    if (data.messages.length === 0) main.appendChild(el('div', 'empty', '没有可显示的消息'));
+    if (!keepScroll || wasAtBottom) main.scrollTop = main.scrollHeight;
+  } catch (e) {
+    main.innerHTML = '<div class="empty">加载失败: ' + e.message + '</div>';
+  }
+}
+
+document.getElementById('showDetailNoise').onchange = () => {
+  const s = findActive();
+  if (s) openSession(s);
+};
+function findActive() {
+  if (!state.data || !state.activeFile) return null;
+  for (const p of state.data.projects)
+    for (const s of p.sessions) if (s.file === state.activeFile) return s;
+  return null;
+}
+
+refresh();
+setInterval(async () => {
+  await refresh();
+  const s = findActive();
+  if (s && s.status !== 'idle') openSession(s, true); // 运行中的会话跟随刷新
+}, 5000);
+</script>
+</body>
+</html>
