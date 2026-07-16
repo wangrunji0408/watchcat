@@ -504,7 +504,9 @@ function detailHermes(sessionId) {
         try {
           for (const tc of JSON.parse(r.tool_calls)) {
             const fn = tc.function || tc;
-            msgs.push({ role: 'tool_use', ts, text: (fn.name || '?') + ' ' + truncate(String(fn.arguments || ''), 400) });
+            const input = truncate(String(fn.arguments || ''), 400);
+            msgs.push({ role: 'tool_use', ts, toolName: fn.name || '?', callId: tc.id || null,
+              input, text: (fn.name || '?') + ' ' + input });
           }
         } catch {}
       }
@@ -534,7 +536,8 @@ function detailClaude(file, content) {
             msgs.push({ role: 'user', text: item.text, ts: l.timestamp });
           } else if (item.type === 'tool_result') {
             const text = extractText(item.content) || (typeof item.content === 'string' ? item.content : '');
-            msgs.push({ role: 'tool_result', text: truncate(text, 600), ts: l.timestamp });
+            const output = truncate(text, 600);
+            msgs.push({ role: 'tool_result', output, text: output, callId: item.tool_use_id || null, ts: l.timestamp });
           }
         }
       }
@@ -545,9 +548,10 @@ function detailClaude(file, content) {
         } else if (item.type === 'thinking' && item.thinking) {
           msgs.push({ role: 'thinking', text: truncate(item.thinking, 600), ts: l.timestamp });
         } else if (item.type === 'tool_use') {
+          const input = truncate(JSON.stringify(item.input || {}), 400);
           msgs.push({
-            role: 'tool_use', ts: l.timestamp,
-            text: item.name + ' ' + truncate(JSON.stringify(item.input || {}), 400),
+            role: 'tool_use', ts: l.timestamp, toolName: item.name, callId: item.id || null, input,
+            text: item.name + ' ' + input,
           });
         }
       }
@@ -567,10 +571,13 @@ function detailCodex(file, content) {
       else if (p.type === 'agent_reasoning' && p.text) msgs.push({ role: 'thinking', text: truncate(p.text, 600), ts: l.timestamp });
     } else if (l.type === 'response_item') {
       if (p.type === 'function_call' || p.type === 'custom_tool_call') {
-        msgs.push({ role: 'tool_use', ts: l.timestamp, text: (p.name || '?') + ' ' + truncate(String(p.arguments ?? p.input ?? ''), 400) });
+        const input = truncate(String(p.arguments ?? p.input ?? ''), 400);
+        msgs.push({ role: 'tool_use', ts: l.timestamp, toolName: p.name || '?', callId: p.call_id || null,
+          input, text: (p.name || '?') + ' ' + input });
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
         const out = typeof p.output === 'string' ? p.output : (p.output && p.output.content) || JSON.stringify(p.output || '');
-        msgs.push({ role: 'tool_result', ts: l.timestamp, text: truncate(String(out), 600) });
+        const output = truncate(String(out), 600);
+        msgs.push({ role: 'tool_result', ts: l.timestamp, callId: p.call_id || null, output, text: output });
       }
     }
   }

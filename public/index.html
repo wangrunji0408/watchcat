@@ -62,6 +62,25 @@
   .msg.thinking .bubble, .msg.tool_use .bubble, .msg.tool_result .bubble {
     background: transparent; border: 1px dashed var(--border); color: var(--dim); font-size: 12.5px;
     font-family: ui-monospace, Menlo, monospace; }
+  .activity { margin: 8px 0 12px; max-width: 900px; color: var(--dim); }
+  .activity, .tool-item, .thought-item { border: 1px dashed var(--border); border-radius: 8px; }
+  .activity > summary, .tool-item > summary, .thought-item > summary {
+    cursor: pointer; user-select: none; list-style: none; }
+  .activity > summary::-webkit-details-marker,
+  .tool-item > summary::-webkit-details-marker,
+  .thought-item > summary::-webkit-details-marker { display: none; }
+  .activity > summary { padding: 7px 12px; font-size: 12.5px; }
+  .activity > summary::before, .tool-item > summary::before, .thought-item > summary::before {
+    content: '›'; display: inline-block; width: 14px; transition: transform .15s; }
+  .activity[open] > summary::before, .tool-item[open] > summary::before, .thought-item[open] > summary::before {
+    transform: rotate(90deg); }
+  .activity-list { padding: 0 8px 8px 22px; }
+  .tool-item, .thought-item { margin-top: 6px; background: rgba(255,255,255,.015); }
+  .tool-item > summary, .thought-item > summary { padding: 6px 10px; font: 12px ui-monospace, Menlo, monospace; }
+  .tool-detail { border-top: 1px dashed var(--border); padding: 7px 10px; }
+  .tool-detail-label { color: var(--accent); font-size: 11px; margin: 5px 0 2px; }
+  .tool-detail-label:first-child { margin-top: 0; }
+  .tool-detail-value { white-space: pre-wrap; word-break: break-word; font: 12px/1.5 ui-monospace, Menlo, monospace; }
   .msg.divider { color: var(--accent); font-size: 12px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
   .empty { color: var(--dim); text-align: center; margin-top: 15vh; }
   .legend { display: flex; gap: 12px; font-size: 12px; color: var(--dim); align-items: center; }
@@ -71,7 +90,6 @@
     display: flex; gap: 10px; align-items: flex-start; z-index: 2; }
   .back-btn { display: none; flex-shrink: 0; background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; font-size: 14px; cursor: pointer; }
-  label.toggle { font-size: 12px; color: var(--dim); cursor: pointer; user-select: none; white-space: nowrap; }
 
   @media (max-width: 800px) {
     header { flex-wrap: wrap; gap: 6px 10px; padding: 8px 12px; padding-top: calc(8px + env(safe-area-inset-top)); }
@@ -99,7 +117,6 @@
     <span class="dot running"></span><span class="txt">运行中</span>
     <span class="dot open"></span><span class="txt">存活</span>
     <span class="dot idle"></span><span class="txt">空闲</span>
-    <label class="toggle"><input type="checkbox" id="showDetailNoise"> 工具/思考</label>
   </div>
 </header>
 <div class="layout">
@@ -107,7 +124,7 @@
   <div class="main" id="main"><div class="empty">选择左侧会话查看日志</div></div>
 </div>
 <script>
-const state = { activeFile: null, collapsed: new Set(), data: null };
+const state = { activeFile: null, collapsed: new Set(), expandedDetails: new Set(), data: null };
 
 // ---------- 各来源 logo (内嵌 SVG 近似图形) ----------
 const LOGOS = {
@@ -161,6 +178,77 @@ function el(tag, cls, text) {
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
+}
+
+function expandable(tag, cls, key) {
+  const node = el(tag, cls);
+  node.dataset.detailKey = key;
+  node.open = state.expandedDetails.has(key);
+  node.addEventListener('toggle', () => {
+    node.open ? state.expandedDetails.add(key) : state.expandedDetails.delete(key);
+  });
+  return node;
+}
+
+function toolName(m) {
+  if (m.toolName) return m.toolName;
+  const match = String(m.text || '').match(/^\S+/);
+  return match ? match[0] : '工具';
+}
+
+function renderActivity(messages, start, sessionFile) {
+  const key = sessionFile + ':activity:' + start;
+  const activity = expandable('details', 'activity', key);
+  const calls = [];
+  const byId = new Map();
+  const thoughts = [];
+
+  for (const m of messages) {
+    if (m.role === 'thinking') {
+      thoughts.push(m);
+    } else if (m.role === 'tool_use') {
+      const call = { use: m, results: [] };
+      calls.push(call);
+      if (m.callId) byId.set(m.callId, call);
+    } else if (m.role === 'tool_result') {
+      let call = m.callId && byId.get(m.callId);
+      if (!call) call = calls.find(c => c.results.length === 0);
+      if (!call) { call = { use: null, results: [] }; calls.push(call); }
+      call.results.push(m);
+    }
+  }
+
+  const label = calls.length ? '调用了 ' + calls.length + ' 次工具' : '思考';
+  activity.appendChild(el('summary', null, label));
+  const list = el('div', 'activity-list');
+
+  thoughts.forEach((m, i) => {
+    const thought = expandable('details', 'thought-item', key + ':thought:' + i);
+    thought.appendChild(el('summary', null, '思考' + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
+    const detail = el('div', 'tool-detail');
+    detail.appendChild(el('div', 'tool-detail-value', m.text));
+    thought.appendChild(detail);
+    list.appendChild(thought);
+  });
+
+  calls.forEach((call, i) => {
+    const item = expandable('details', 'tool-item', key + ':tool:' + i);
+    const name = call.use ? toolName(call.use) : (call.results[0] && toolName(call.results[0])) || '工具结果';
+    item.appendChild(el('summary', null, name + (call.use && call.use.ts ? ' · ' + fmtTime(call.use.ts) : '')));
+    const detail = el('div', 'tool-detail');
+    if (call.use) {
+      detail.appendChild(el('div', 'tool-detail-label', '工具调用'));
+      detail.appendChild(el('div', 'tool-detail-value', call.use.input || call.use.text));
+    }
+    detail.appendChild(el('div', 'tool-detail-label', '工具结果'));
+    detail.appendChild(el('div', 'tool-detail-value', call.results.length
+      ? call.results.map(r => r.output || r.text).join('\n') : '（暂无结果）'));
+    item.appendChild(detail);
+    list.appendChild(item);
+  });
+
+  activity.appendChild(list);
+  return activity;
 }
 
 async function refresh() {
@@ -292,15 +380,22 @@ async function openSession(s, keepScroll) {
     head.appendChild(el('span', null, (SRC_NAMES[s.source] || s.source) + ' · ' + s.title +
       (s.contextTokens != null ? ' · ' + fmtK(s.contextTokens) + ' ctx' : '')));
     main.appendChild(head);
-    const showNoise = document.getElementById('showDetailNoise').checked;
-    const roleNames = { user: '用户', assistant: '助手', thinking: '思考', tool_use: '工具调用', tool_result: '工具结果' };
-    for (const m of data.messages) {
-      if (!showNoise && (m.role === 'thinking' || m.role === 'tool_use' || m.role === 'tool_result')) continue;
+    const roleNames = { user: '用户', assistant: '助手' };
+    for (let i = 0; i < data.messages.length;) {
+      const m = data.messages[i];
+      if (m.role === 'thinking' || m.role === 'tool_use' || m.role === 'tool_result') {
+        let end = i + 1;
+        while (end < data.messages.length && ['thinking', 'tool_use', 'tool_result'].includes(data.messages[end].role)) end++;
+        main.appendChild(renderActivity(data.messages.slice(i, end), i, s.file));
+        i = end;
+        continue;
+      }
       const box = el('div', 'msg ' + m.role);
-      if (m.role === 'divider') { box.textContent = m.text; main.appendChild(box); continue; }
+      if (m.role === 'divider') { box.textContent = m.text; main.appendChild(box); i++; continue; }
       box.appendChild(el('div', 'meta', (roleNames[m.role] || m.role) + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
       box.appendChild(el('div', 'bubble', m.text));
       main.appendChild(box);
+      i++;
     }
     if (data.messages.length === 0) main.appendChild(el('div', 'empty', '没有可显示的消息'));
     if (!keepScroll || wasAtBottom) main.scrollTop = main.scrollHeight;
@@ -309,10 +404,6 @@ async function openSession(s, keepScroll) {
   }
 }
 
-document.getElementById('showDetailNoise').onchange = () => {
-  const s = findActive();
-  if (s) openSession(s);
-};
 function findActive() {
   if (!state.data || !state.activeFile) return null;
   for (const p of state.data.projects)
