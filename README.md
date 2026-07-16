@@ -19,6 +19,7 @@ npm start
 - **数据来源**
   - Claude Code：`~/.claude/projects/*/*.jsonl`
   - Codex（CLI / Desktop）：`~/.codex/sessions/**/*.jsonl`
+  - Remote SSH：自动从 Codex Desktop 的活跃 SSH 连接发现远端主机，同时读取远端 Codex `$CODEX_HOME/sessions/**/*.jsonl` 和 Claude Code `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/*.jsonl`；也可用 `WATCHCAT_SSH_HOSTS=host1,host2` 显式配置
   - Hermes：`~/.hermes/state.db`（只读打开 SQLite，需 Node ≥ 22.5 内置 `node:sqlite`，低版本自动跳过）
 - **按项目分组**：以会话记录中的 `cwd` 为项目维度；Hermes 会话无 cwd 时按来源渠道分组（如 `hermes://telegram`、`hermes://weixin`）。最近活动的项目排前，有运行中会话的项目置顶。
 - **运行状态**（每 5 秒自动刷新）
@@ -27,6 +28,8 @@ npm start
   - ⚫ 空闲：历史会话
 - **日志查看**：点击会话查看完整对话（用户 / 助手消息），可选显示思考过程与工具调用；运行中的会话自动跟随最新输出滚动。
 
+Remote SSH 使用本机现有 SSH 配置和密钥，以 `BatchMode` 只读访问远端。默认最多读取每台主机最近的 10 个会话，并限制为 4 路并发；可通过 `WATCHCAT_REMOTE_MAX_FILES` 和 `WATCHCAT_REMOTE_READ_CONCURRENCY` 调整。
+
 ## 安全说明
 
-服务监听 `0.0.0.0`，会话日志可能包含敏感信息，请仅在可信局域网内使用。日志读取接口做了路径白名单校验，只允许访问上述两个日志目录内的 `.jsonl` 文件。
+服务监听 `0.0.0.0`，会话日志可能包含敏感信息，请仅在可信局域网内使用。日志读取接口做了路径白名单校验，只允许访问已扫描到的本地或远端会话日志。

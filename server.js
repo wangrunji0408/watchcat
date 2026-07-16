@@ -15,6 +15,19 @@ const CODEX_DIR = path.join(HOME, '.codex', 'sessions');
 const HERMES_DB = path.join(HOME, '.hermes', 'state.db');
 const HERMES_PID_FILE = path.join(HOME, '.hermes', 'gateway.pid');
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const REMOTE_CACHE_MS = parseInt(process.env.WATCHCAT_REMOTE_CACHE_MS || '5000', 10);
+const REMOTE_MAX_FILES = parseInt(process.env.WATCHCAT_REMOTE_MAX_FILES || '10', 10);
+const REMOTE_READ_CONCURRENCY = parseInt(process.env.WATCHCAT_REMOTE_READ_CONCURRENCY || '4', 10);
+const REMOTE_MAX_BUFFER = parseInt(process.env.WATCHCAT_REMOTE_MAX_BUFFER || String(128 * 1024 * 1024), 10);
+const SSH_ARGS = [
+  '-o', 'BatchMode=yes',
+  '-o', 'ConnectTimeout=5',
+  '-o', 'ConnectionAttempts=1',
+  '-o', 'ClearAllForwardings=yes',
+  '-o', 'ControlMaster=auto',
+  '-o', 'ControlPersist=30',
+  '-o', 'ControlPath=/tmp/watchcat-ssh-%C',
+];
 
 // ---------- 工具 ----------
 
@@ -62,14 +75,17 @@ function getOpenJsonlFiles() {
 
 const summaryCache = new Map(); // path -> { mtimeMs, size, summary }
 
-function parseLines(file) {
+function parseJsonLines(content) {
   const out = [];
-  const content = fs.readFileSync(file, 'utf8');
   for (const line of content.split('\n')) {
     if (!line.trim()) continue;
     try { out.push(JSON.parse(line)); } catch { /* 忽略截断行 */ }
   }
   return out;
+}
+
+function parseLines(file) {
+  return parseJsonLines(fs.readFileSync(file, 'utf8'));
 }
 
 function isNoiseUserText(text) {
@@ -85,8 +101,8 @@ function extractText(content) {
 }
 
 // Claude Code 会话摘要
-function summarizeClaude(file, stat) {
-  const lines = parseLines(file);
+function summarizeClaude(file, stat, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
   let cwd = null, firstUserText = null, summaryTitle = null, gitBranch = null, version = null;
   let firstTs = null, lastTs = null, userCount = 0, assistantCount = 0, lastEventText = null;
   let sessionId = path.basename(file, '.jsonl');
@@ -139,8 +155,8 @@ function decodeClaudeDirName(name) {
 }
 
 // Codex 会话摘要
-function summarizeCodex(file, stat) {
-  const lines = parseLines(file);
+function summarizeCodex(file, stat, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
   let cwd = null, sessionId = path.basename(file, '.jsonl'), source = null, model = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
   let userCount = 0, agentCount = 0, contextTokens = null;
@@ -181,6 +197,205 @@ function summarizeCodex(file, stat) {
     contextTokens,
     sizeBytes: stat.size,
   };
+}
+
+// ---------- Agent Remote SSH ----------
+
+function execFileText(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: 10000, maxBuffer: REMOTE_MAX_BUFFER, ...options },
+      (err, stdout, stderr) => {
+        if (err) {
+          err.stderr = stderr;
+          reject(err);
+        } else resolve(stdout);
+      });
+  });
+}
+
+function shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+function sshCommand(host, script, options = {}) {
+  return execFileText('ssh', [...SSH_ARGS, host, `sh -c ${shellQuote(script)}`], options);
+}
+
+let remoteHostsCache = { at: 0, hosts: [] };
+
+async function discoverRemoteHosts() {
+  if (Date.now() - remoteHostsCache.at < 5000) return remoteHostsCache.hosts;
+  const hosts = new Set((process.env.WATCHCAT_SSH_HOSTS || '').split(',').map(s => s.trim()).filter(Boolean));
+  try {
+    const stdout = await execFileText('ps', ['-ww', '-axo', 'command='], { maxBuffer: 8 * 1024 * 1024 });
+    for (const line of stdout.split('\n')) {
+      if (!/(?:^|\/)ssh\s/.test(line) || !line.includes('codex app-server proxy')) continue;
+      const commandStart = line.indexOf(' sh -c ');
+      if (commandStart < 0) continue;
+      // Codex Desktop 的连接格式为: ssh [options] <host> sh -c ...
+      const prefix = line.slice(0, commandStart).trim().split(/\s+/);
+      const host = prefix[prefix.length - 1];
+      if (/^[\w.@:-]+$/.test(host)) hosts.add(host);
+    }
+  } catch { /* ps 不可用时仍使用显式配置 */ }
+  remoteHostsCache = { at: Date.now(), hosts: [...hosts] };
+  return remoteHostsCache.hosts;
+}
+
+const REMOTE_SCAN_SCRIPT = `
+codex_root="\${CODEX_HOME:-$HOME/.codex}/sessions"
+claude_root="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+printf 'ROOT\\tcodex\\t%s\\n' "$codex_root"
+printf 'ROOT\\tclaude\\t%s\\n' "$claude_root"
+if [ -d "$codex_root" ]; then
+  if stat -c '%Y' "$codex_root" >/dev/null 2>&1; then
+    find "$codex_root" -type f -name '*.jsonl' -exec stat -c 'FILE\tcodex\t%Y\t%s\t%n' {} + 2>/dev/null
+  else
+    find "$codex_root" -type f -name '*.jsonl' -exec stat -f 'FILE\tcodex\t%m\t%z\t%N' {} + 2>/dev/null
+  fi
+fi
+if [ -d "$claude_root" ]; then
+  if stat -c '%Y' "$claude_root" >/dev/null 2>&1; then
+    find "$claude_root" -type f -name '*.jsonl' ! -path '*/subagents/*' -exec stat -c 'FILE\tclaude\t%Y\t%s\t%n' {} + 2>/dev/null
+  else
+    find "$claude_root" -type f -name '*.jsonl' ! -path '*/subagents/*' -exec stat -f 'FILE\tclaude\t%m\t%z\t%N' {} + 2>/dev/null
+  fi
+fi
+if command -v lsof >/dev/null 2>&1; then
+  lsof -Fn -c codex -c claude 2>/dev/null | sed -n 's/^n\\(.*\\.jsonl\\)$/OPEN\\t\\1/p'
+fi
+if command -v pgrep >/dev/null 2>&1 && [ -d /proc ]; then
+  for pid in $(pgrep -x claude 2>/dev/null); do
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+    printf 'ALIVE\\tclaude\\t%s\\n' "$cwd"
+  done
+elif command -v lsof >/dev/null 2>&1; then
+  lsof -a -c claude -d cwd -Fn 2>/dev/null | sed -n 's/^n/ALIVE\\tclaude\\t/p'
+fi
+`;
+
+function parseRemoteScan(stdout) {
+  const result = { roots: {}, files: [], openFiles: new Set(), aliveProjects: {} };
+  for (const line of stdout.split('\n')) {
+    const fields = line.split('\t');
+    if (fields[0] === 'ROOT' && fields.length >= 3) result.roots[fields[1]] = fields.slice(2).join('\t');
+    else if (fields[0] === 'FILE' && fields.length >= 5) {
+      result.files.push({ kind: fields[1], mtimeMs: Number(fields[2]) * 1000, size: Number(fields[3]), path: fields.slice(4).join('\t') });
+    } else if (fields[0] === 'OPEN') result.openFiles.add(fields.slice(1).join('\t'));
+    else if (fields[0] === 'ALIVE' && fields.length >= 3) {
+      if (!result.aliveProjects[fields[1]]) result.aliveProjects[fields[1]] = new Set();
+      result.aliveProjects[fields[1]].add(fields.slice(2).join('\t'));
+    }
+  }
+  result.files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  result.files = result.files.slice(0, REMOTE_MAX_FILES);
+  return result;
+}
+
+function remoteFileId(kind, host, file) {
+  return 'remote-' + kind + ':' + Buffer.from(host + '\0' + file).toString('base64url');
+}
+
+const remoteSummaryCache = new Map(); // host\0path -> { mtimeMs, size, content, summary }
+const remoteFileIndex = new Map(); // opaque id -> cache entry
+let remoteSessionsCache = { at: 0, sessions: [], hosts: [], errors: [] };
+
+async function readRemoteFile(host, file, offset, length) {
+  if (length <= 0) return '';
+  const quoted = shellQuote(file);
+  const script = offset > 0
+    ? `tail -c +${offset + 1} ${quoted} | head -c ${length}`
+    : `head -c ${length} ${quoted}`;
+  return sshCommand(host, script, { timeout: 30000 });
+}
+
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index], index);
+    }
+  }
+  const count = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: count }, worker));
+  return results;
+}
+
+async function scanRemoteHost(host) {
+  const scan = parseRemoteScan(await sshCommand(host, REMOTE_SCAN_SCRIPT));
+  const entries = await mapLimit(scan.files, REMOTE_READ_CONCURRENCY, async (meta) => {
+    try {
+      const key = meta.kind + '\0' + host + '\0' + meta.path;
+      let cached = remoteSummaryCache.get(key);
+      if (!cached || cached.mtimeMs !== meta.mtimeMs || cached.size !== meta.size) {
+        const canAppend = cached && meta.size > cached.size;
+        const offset = canAppend ? cached.size : 0;
+        const chunk = await readRemoteFile(host, meta.path, offset, meta.size - offset);
+        const content = canAppend ? cached.content + chunk : chunk;
+        const id = remoteFileId(meta.kind, host, meta.path);
+        const summary = meta.kind === 'claude'
+          ? summarizeClaude(id, { size: meta.size }, content)
+          : summarizeCodex(id, { size: meta.size }, content);
+        cached = {
+          kind: meta.kind, host, path: meta.path, root: scan.roots[meta.kind],
+          mtimeMs: meta.mtimeMs, size: meta.size, content, summary,
+        };
+        remoteSummaryCache.set(key, cached);
+      }
+      return { meta, cached };
+    } catch (error) {
+      return { meta, error };
+    }
+  });
+
+  // Claude 会在每次写入后关闭日志文件；用存活进程的 cwd 关联该项目最新会话。
+  const latestAliveClaude = new Map();
+  const aliveClaudeProjects = scan.aliveProjects.claude || new Set();
+  for (const { meta, cached } of entries) {
+    if (!cached || meta.kind !== 'claude' || !cached.summary) continue;
+    const project = cached.summary.project;
+    if (!aliveClaudeProjects.has(project)) continue;
+    const previous = latestAliveClaude.get(project);
+    if (!previous || meta.mtimeMs > previous.mtimeMs) latestAliveClaude.set(project, { path: meta.path, mtimeMs: meta.mtimeMs });
+  }
+
+  const sessions = [];
+  for (const { meta, cached } of entries) {
+    if (!cached) continue; // 单个历史日志读取失败不影响同一主机上的其他会话
+    if (!cached.summary) continue;
+    const s = { ...cached.summary };
+    s.remoteHost = host;
+    s.remotePath = meta.path;
+    s.project = host + ':' + s.project;
+    s.version = [s.version, 'SSH ' + host].filter(Boolean).join(' · ');
+    const now = Date.now();
+    const ageMs = s.lastTs ? now - Date.parse(s.lastTs) : Infinity;
+    const mtimeAge = now - meta.mtimeMs;
+    const aliveClaude = meta.kind === 'claude' && latestAliveClaude.get(cached.summary.project)?.path === meta.path;
+    if (mtimeAge < 60 * 1000) s.status = 'running';
+    else if (scan.openFiles.has(meta.path)) s.status = ageMs < 2 * 60 * 1000 ? 'running' : 'open';
+    else if (aliveClaude) s.status = 'open';
+    else s.status = 'idle';
+    sessions.push(s);
+    remoteFileIndex.set(s.file, cached);
+  }
+  return { host, sessions };
+}
+
+async function remoteAgentSessions() {
+  if (Date.now() - remoteSessionsCache.at < REMOTE_CACHE_MS) return remoteSessionsCache;
+  const hosts = await discoverRemoteHosts();
+  const results = await Promise.allSettled(hosts.map(scanRemoteHost));
+  const sessions = [], errors = [];
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result.status === 'fulfilled') sessions.push(...result.value.sessions);
+    else errors.push({ host: hosts[i], error: result.reason && result.reason.message || 'SSH failed' });
+  }
+  remoteSessionsCache = { at: Date.now(), sessions, hosts, errors };
+  return remoteSessionsCache;
 }
 
 function getSummary(file, kind) {
@@ -302,8 +517,8 @@ function detailHermes(sessionId) {
 
 // ---------- 会话详情 ----------
 
-function detailClaude(file) {
-  const lines = parseLines(file);
+function detailClaude(file, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
   for (const l of lines) {
     if (l.isSidechain) continue;
@@ -341,8 +556,8 @@ function detailClaude(file) {
   return msgs;
 }
 
-function detailCodex(file) {
-  const lines = parseLines(file);
+function detailCodex(file, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
   for (const l of lines) {
     const p = l.payload || {};
@@ -388,7 +603,11 @@ async function apiSessions() {
     if (s) sessions.push(s);
   }
 
+  const remote = await remoteAgentSessions();
+  sessions.push(...remote.sessions);
+
   for (const s of sessions) {
+    if (s.remoteHost) continue; // 远端状态已在对应主机上判定
     const ageMs = s.lastTs ? now - Date.parse(s.lastTs) : Infinity;
     let mtimeAge = Infinity;
     try { mtimeAge = now - fs.statSync(s.file).mtimeMs; } catch {}
@@ -419,7 +638,12 @@ async function apiSessions() {
   });
   // 有运行中的排最前,其余按最近活动排序
   projects.sort((a, b) => (b.running - a.running) || (b.lastTs || '').localeCompare(a.lastTs || ''));
-  return { projects, generatedAt: new Date().toISOString() };
+  return {
+    projects,
+    generatedAt: new Date().toISOString(),
+    remoteHosts: remote.hosts,
+    remoteErrors: remote.errors,
+  };
 }
 
 function apiSessionDetail(query) {
@@ -429,6 +653,14 @@ function apiSessionDetail(query) {
     const id = file.slice('hermes:'.length);
     if (!/^[\w.-]+$/.test(id)) throw httpError(400, 'bad hermes session id');
     return { file, source: 'hermes', messages: detailHermes(id) };
+  }
+  if (file.startsWith('remote-codex:') || file.startsWith('remote-claude:')) {
+    const remote = remoteFileIndex.get(file);
+    if (!remote) throw httpError(404, 'remote session not found; refresh sessions first');
+    const messages = remote.kind === 'claude'
+      ? detailClaude(file, remote.content)
+      : detailCodex(file, remote.content);
+    return { file, source: remote.kind, remoteHost: remote.host, messages };
   }
   const resolved = path.resolve(file);
   const inClaude = resolved.startsWith(CLAUDE_DIR + path.sep);
@@ -474,14 +706,25 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Watchcat 已启动:`);
-  console.log(`  本机:   http://localhost:${PORT}`);
-  for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
-    for (const a of addrs || []) {
-      if (a.family === 'IPv4' && !a.internal) {
-        console.log(`  局域网: http://${a.address}:${PORT}  (${name})`);
+if (require.main === module) {
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Watchcat 已启动:`);
+    console.log(`  本机:   http://localhost:${PORT}`);
+    for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
+      for (const a of addrs || []) {
+        if (a.family === 'IPv4' && !a.internal) {
+          console.log(`  局域网: http://${a.address}:${PORT}  (${name})`);
+        }
       }
     }
-  }
-});
+  });
+}
+
+module.exports = {
+  apiSessions,
+  apiSessionDetail,
+  discoverRemoteHosts,
+  parseRemoteScan,
+  remoteAgentSessions,
+  summarizeCodex,
+};

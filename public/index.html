@@ -189,6 +189,10 @@ function sessionRow(s, showProject) {
     sub.appendChild(p);
     sub.appendChild(document.createTextNode(' · '));
   }
+  if (s.remoteHost) {
+    sub.appendChild(el('span', 'session-proj', 'SSH ' + s.remoteHost));
+    sub.appendChild(document.createTextNode(' · '));
+  }
   sub.appendChild(document.createTextNode(fmtTime(s.lastTs) + ' · ' + s.turns + ' 轮'));
   if (s.contextTokens != null) {
     sub.appendChild(document.createTextNode(' · '));
@@ -254,7 +258,9 @@ function renderSidebar() {
   }
   if (!projects.length) sb.appendChild(el('div', 'empty', '没有找到任何会话日志'));
   document.getElementById('stats').textContent =
-    projects.length + ' 项目 · ' + total + ' 会话' + (running ? ' · ' + running + ' 运行中' : '');
+    projects.length + ' 项目 · ' + total + ' 会话' + (running ? ' · ' + running + ' 运行中' : '') +
+    (state.data.remoteHosts && state.data.remoteHosts.length ? ' · SSH ' + state.data.remoteHosts.join(', ') : '') +
+    (state.data.remoteErrors && state.data.remoteErrors.length ? ' · SSH 异常' : '');
 }
 
 function toggleGroup(key) {
