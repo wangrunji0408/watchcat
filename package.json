@@ -4,7 +4,8 @@
   "description": "局域网可访问的 Claude Code / Codex 会话日志监控面板",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "marked": "15.0.12"

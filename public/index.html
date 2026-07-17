@@ -52,6 +52,9 @@
   .session-sub { color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .session-proj { color: var(--accent); }
   .ctx { color: var(--accent); }
+  .model { color: var(--dim); }
+  .cost { color: var(--green); }
+  .cost.unknown { color: var(--dim); }
   .logo { width: 18px; height: 18px; flex-shrink: 0; margin-top: 2px; opacity: .9; }
 
   .msg { margin-bottom: 12px; max-width: 900px; }
@@ -117,6 +120,8 @@
   .detail-head { position: sticky; top: -16px; background: var(--bg); padding: 8px 0; margin: -8px 0 12px;
     border-bottom: 1px solid var(--border); font-size: 13px; color: var(--dim); word-break: break-all;
     display: flex; gap: 10px; align-items: flex-start; z-index: 2; }
+  .detail-summary { min-width: 0; }
+  .detail-metrics { margin-top: 2px; color: var(--dim); font-size: 11px; }
   .back-btn { display: none; flex-shrink: 0; background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; font-size: 14px; cursor: pointer; }
 
@@ -202,6 +207,36 @@ function fmtAge(ts) {
 function fmtK(n) {
   if (n == null) return '';
   return n >= 1000 ? Math.round(n / 1000) + 'K' : String(n);
+}
+function fmtUsd(n) {
+  if (n == null || !Number.isFinite(n)) return '';
+  if (n === 0) return '$0.00';
+  if (n < 0.0001) return '<$0.0001';
+  if (n < 0.01) return '$' + n.toFixed(4);
+  if (n < 1) return '$' + n.toFixed(3);
+  return '$' + n.toFixed(2);
+}
+function costText(cost) {
+  if (!cost || cost.usd == null) return '价格未知';
+  return fmtUsd(cost.usd) + (cost.complete ? '' : '+');
+}
+function costTitle(s) {
+  if (!s.cost || s.cost.usd == null) {
+    const names = s.cost && s.cost.unknownModels || s.models || [];
+    return names.length ? '未收录官方 API 单价：' + names.join(', ') : '没有可计算的 token 用量';
+  }
+  const u = s.usage || {};
+  const rows = [
+    '按 Standard API 公开单价估算（USD）',
+    '输入 ' + Number(u.inputTokens || 0).toLocaleString() +
+      ' · 缓存读取 ' + Number(u.cachedInputTokens || 0).toLocaleString() +
+      ' · 缓存写入 ' + Number((u.cacheWriteTokens || 0) + (u.cacheWrite1hTokens || 0)).toLocaleString() +
+      ' · 输出 ' + Number(u.outputTokens || 0).toLocaleString(),
+  ];
+  if (!s.cost.complete && s.cost.unknownModels && s.cost.unknownModels.length) {
+    rows.push('不含未定价模型：' + s.cost.unknownModels.join(', '));
+  }
+  return rows.join('\n');
 }
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -393,17 +428,24 @@ function sessionRow(s, showProject) {
     sub.appendChild(p);
     sub.appendChild(document.createTextNode(' · '));
   }
-  if (s.remoteHost) {
-    sub.appendChild(el('span', 'session-proj', 'SSH ' + s.remoteHost));
-    sub.appendChild(document.createTextNode(' · '));
-  }
   sub.appendChild(document.createTextNode(fmtTime(s.lastTs) + ' · ' + s.turns + ' 轮'));
+  if (s.model) {
+    sub.appendChild(document.createTextNode(' · '));
+    const model = el('span', 'model', s.model + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));
+    model.title = s.models && s.models.length ? s.models.join(', ') : s.model;
+    sub.appendChild(model);
+  }
   if (s.contextTokens != null) {
     sub.appendChild(document.createTextNode(' · '));
     sub.appendChild(el('span', 'ctx', fmtK(s.contextTokens) + ' ctx'));
   }
+  if (s.usage && s.cost && s.cost.usd != null) {
+    sub.appendChild(document.createTextNode(' · '));
+    const cost = el('span', 'cost', costText(s.cost));
+    cost.title = costTitle(s);
+    sub.appendChild(cost);
+  }
   if (s.gitBranch) sub.appendChild(document.createTextNode(' · ' + s.gitBranch));
-  if (s.lastMessage) sub.appendChild(document.createTextNode(' · ' + s.lastMessage));
   body.appendChild(sub);
   row.appendChild(body);
   const logoWrap = el('span');
@@ -418,12 +460,17 @@ function renderSidebar() {
   const { projects } = state.data;
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
-  let total = 0, running = 0;
+  let total = 0, running = 0, totalCost = 0, pricedSessions = 0, incompleteCosts = 0;
   const active = [];
   for (const p of projects) {
     total += p.sessions.length;
     for (const s of p.sessions) {
       if (s.status === 'running') { running++; active.push(s); }
+      if (s.cost && s.cost.usd != null) {
+        totalCost += s.cost.usd;
+        pricedSessions++;
+        if (!s.cost.complete) incompleteCosts++;
+      } else if (s.usage) incompleteCosts++;
     }
   }
   // 顶部: 运行中会话,按最近活动降序
@@ -463,6 +510,7 @@ function renderSidebar() {
   if (!projects.length) sb.appendChild(el('div', 'empty', '没有找到任何会话日志'));
   document.getElementById('stats').textContent =
     projects.length + ' 项目 · ' + total + ' 会话' + (running ? ' · ' + running + ' 运行中' : '') +
+    (pricedSessions ? ' · ' + fmtUsd(totalCost) + (incompleteCosts ? '+' : '') : '') +
     (state.data.remoteHosts && state.data.remoteHosts.length ? ' · SSH ' + state.data.remoteHosts.join(', ') : '') +
     (state.data.remoteErrors && state.data.remoteErrors.length ? ' · SSH 异常' : '');
 }
@@ -493,8 +541,16 @@ async function openSession(s, keepScroll) {
     const back = el('button', 'back-btn', '‹ 返回');
     back.onclick = closeDetail;
     head.appendChild(back);
-    head.appendChild(el('span', null, (SRC_NAMES[s.source] || s.source) + ' · ' + s.title +
-      (s.contextTokens != null ? ' · ' + fmtK(s.contextTokens) + ' ctx' : '')));
+    const summary = el('div', 'detail-summary');
+    summary.appendChild(el('div', null, (SRC_NAMES[s.source] || s.source) + ' · ' + s.title));
+    const metrics = [];
+    if (s.model) metrics.push('模型 ' + s.model + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));
+    if (s.contextTokens != null) metrics.push(fmtK(s.contextTokens) + ' ctx');
+    if (s.usage) metrics.push(costText(s.cost));
+    const metricsNode = el('div', 'detail-metrics', metrics.join(' · '));
+    metricsNode.title = costTitle(s);
+    summary.appendChild(metricsNode);
+    head.appendChild(summary);
     main.appendChild(head);
     const roleNames = { user: '用户', assistant: '助手' };
     for (let i = 0; i < data.messages.length;) {

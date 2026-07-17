@@ -28,6 +28,9 @@ npm start
   - 🟡 进程存活：进程仍持有日志文件句柄（`lsof`）但近期无输出；Hermes 为 gateway 存活且会话未标记结束
   - ⚫ 空闲：历史会话
 - **日志查看**：点击会话查看完整对话（用户、助手和思考内容使用 Markdown 渲染），思考过程与工具调用默认折叠展示；运行中的会话自动跟随最新输出滚动。
+- **模型与成本**：显示每个会话实际记录的模型名，并按 OpenAI / Anthropic Standard API 公开单价估算 token 成本（USD）；区分输入、缓存读写与输出 token，OpenAI 长上下文自动采用对应单价。没有可匹配官方价格的第三方模型显示“价格未知”。
+
+成本是按日志 token 用量计算的 API 公价估算，不代表 Claude/Codex 订阅实际账单，也不含代理商加价、Batch/Flex/Priority、工具调用等额外费用。内置价格更新日期为 2026-07-17，来源为 [OpenAI API Pricing](https://developers.openai.com/api/docs/pricing) 和 [Claude Pricing](https://platform.claude.com/docs/en/about-claude/pricing)。
 
 Remote SSH 使用本机现有 SSH 配置和密钥，以 `BatchMode` 只读访问远端。默认最多读取每台主机最近的 10 个会话，并限制为 4 路并发；可通过 `WATCHCAT_REMOTE_MAX_FILES` 和 `WATCHCAT_REMOTE_READ_CONCURRENCY` 调整。
 
