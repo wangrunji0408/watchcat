@@ -60,8 +60,8 @@ test('deduplicates repeated Claude log entries by message id', () => {
 
 test('marks models without an official catalog price as unknown', () => {
   const usage = normalizedUsage({ input_tokens: 1_000, output_tokens: 100 }, 'claude');
-  const result = summarizeUsageRecords([{ model: 'deepseek-v4-pro', usage }]);
+  const result = summarizeUsageRecords([{ model: 'unknown-model-v1', usage }]);
 
   assert.equal(result.cost.usd, null);
-  assert.deepEqual(result.cost.unknownModels, ['deepseek-v4-pro']);
+  assert.deepEqual(result.cost.unknownModels, ['unknown-model-v1']);
 });

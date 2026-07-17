@@ -54,9 +54,10 @@ function truncate(s, n) {
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
-// 更新于 2026-07-17：
+// 更新于 2026-07-18：
 // OpenAI: https://developers.openai.com/api/docs/pricing
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+// Kimi: https://platform.kimi.com/docs/pricing
 const MODEL_PRICES = [
   { test: /^gpt-5\.6-sol(?:-|$)/, name: 'gpt-5.6-sol', input: 5, cached: .5, output: 30, long: [10, 1, 45] },
   { test: /^gpt-5\.6-terra(?:-|$)/, name: 'gpt-5.6-terra', input: 2.5, cached: .25, output: 15, long: [5, .5, 22.5] },
@@ -80,11 +81,28 @@ const MODEL_PRICES = [
   { test: /^deepseek-v4-pro(?:-|$)/, name: 'DeepSeek V4 Pro', input: .435, cached: .003625, output: .87 },
   { test: /^deepseek-v4-flash(?:-|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
   { test: /^deepseek-(?:chat|reasoner)(?:-|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
+  // Kimi: https://platform.kimi.com/docs/pricing
+  { test: /^kimi-k3(?:-|$)/, name: 'Kimi K3', input: 3, cached: .3, output: 15 },
+  { test: /^kimi-k2\.7-code-highspeed(?:-|$)/, name: 'Kimi K2.7 Code HighSpeed', input: 1.9, cached: .38, output: 8 },
+  { test: /^kimi-k2\.7-code(?:-|$)/, name: 'Kimi K2.7 Code', input: .95, cached: .19, output: 4 },
+  { test: /^kimi-k2\.7(?:-|$)/, name: 'Kimi K2.7', input: .95, cached: .19, output: 4 },
+  { test: /^kimi-k2\.6(?:-|$)/, name: 'Kimi K2.6', input: .95, cached: .16, output: 4 },
+  { test: /^kimi-k2\.5(?:-|$)/, name: 'Kimi K2.5', input: .6, cached: .1, output: 3 },
+  { test: /^kimi-k2-thinking-turbo(?:-|$)/, name: 'Kimi K2 Thinking Turbo', input: 1.15, cached: .15, output: 8 },
+  { test: /^kimi-k2-turbo-preview(?:-|$)/, name: 'Kimi K2 Turbo Preview', input: 1.15, cached: .15, output: 8 },
+  { test: /^kimi-k2-thinking(?:-|$)/, name: 'Kimi K2 Thinking', input: .6, cached: .15, output: 2.5 },
+  { test: /^kimi-k2-\d{4}-preview(?:-|$)/, name: 'Kimi K2 Preview', input: .6, cached: .15, output: 2.5 },
+  { test: /^kimi-k2(?:-|$)/, name: 'Kimi K2', input: .6, cached: .15, output: 2.5 },
+  // Moonshot V1（无上下文缓存，预计 2026-08-31 下线）
+  { test: /^moonshot-v1-128k(?:-|$)/, name: 'Moonshot V1 128K', input: 2, output: 5 },
+  { test: /^moonshot-v1-32k(?:-|$)/, name: 'Moonshot V1 32K', input: 1, output: 3 },
+  { test: /^moonshot-v1-8k(?:-|$)/, name: 'Moonshot V1 8K', input: .2, output: 2 },
+  { test: /^moonshot-v1(?:-|$)/, name: 'Moonshot V1', input: 1, output: 3 },
 ];
 
 function normalizeModelName(model) {
   return String(model || '').trim().toLowerCase()
-    .replace(/^(?:openai|anthropic)\//, '')
+    .replace(/^(?:openai|anthropic|moonshot)\//, '')
     .replace(/^azure-/, '')
     .replace(/-\d{4}-\d{2}-\d{2}$/, '');
 }
