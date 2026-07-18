@@ -139,3 +139,21 @@ test('parses Claude Code sidechain rows when they are in a subagent transcript',
   assert.equal(summary.turns, 2);
   assert.deepEqual(detailClaude(file, content).map(m => m.role), ['user', 'assistant']);
 });
+
+test('renders Claude Code subagent launch and completion as agent events', () => {
+  const rows = [
+    { type: 'user', timestamp: '2026-07-18T00:00:00Z', toolUseResult: {
+      isAsync: true, status: 'async_launched', agentId: 'worker-2', description: 'Find benchmarks',
+    }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'launched' }] } },
+    { type: 'user', timestamp: '2026-07-18T00:01:00Z', message: { role: 'user', content:
+      '<task-notification>\n<task-id>worker-2</task-id>\n<status>completed</status>\n' +
+      '<summary>Agent "Find benchmarks" finished</summary>\n<result>done</result>\n</task-notification>' } },
+  ];
+  const detail = detailClaude('/tmp/project/main.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.deepEqual(detail.map(m => [m.role, m.event, m.agentId]), [
+    ['subagent', 'started', 'worker-2'],
+    ['subagent', 'completed', 'worker-2'],
+  ]);
+  assert.equal(detail[1].title, 'Find benchmarks');
+});

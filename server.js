@@ -252,6 +252,25 @@ function extractText(content) {
   return '';
 }
 
+function parseClaudeTaskNotification(text) {
+  if (typeof text !== 'string' || !text.includes('<task-notification>')) return null;
+  const tag = (name) => {
+    const match = text.match(new RegExp(`<${name}>([\\s\\S]*?)<\\/${name}>`));
+    return match ? match[1].trim() : null;
+  };
+  const summary = tag('summary');
+  if (!summary || !/^Agent\s+/i.test(summary)) return null; // 排除后台 shell command 通知
+  const titleMatch = summary.match(/^Agent\s+["“]([\s\S]*?)["”]\s+(?:finished|failed|stopped)/i);
+  const status = tag('status') || 'completed';
+  return {
+    role: 'subagent',
+    event: status === 'completed' ? 'completed' : status,
+    agentId: tag('task-id'),
+    title: titleMatch ? titleMatch[1] : summary.replace(/^Agent\s+/i, '').replace(/\s+finished$/i, ''),
+    text: summary,
+  };
+}
+
 // Claude Code 会话摘要
 function summarizeClaude(file, stat, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
@@ -278,7 +297,7 @@ function summarizeClaude(file, stat, content) {
     if (l.type === 'summary' && l.summary) summaryTitle = l.summary;
     if (l.type === 'user' && l.message && (!l.isSidechain || isSubagent) && !l.isMeta) {
       const text = extractText(l.message.content);
-      if (text && !isNoiseUserText(text)) {
+      if (text && !isNoiseUserText(text) && !parseClaudeTaskNotification(text)) {
         userCount++;
         if (!firstUserText) firstUserText = text;
       }
@@ -737,6 +756,7 @@ async function remoteAgentSessions() {
 function listOpenClawSessionEntries() {
   const entriesByFile = new Map();
   const keyToSessionId = new Map();
+  const keyToFile = new Map();
   const indexed = [];
   for (const agent of safeReadDir(OPENCLAW_AGENTS_DIR)) {
     if (!agent.isDirectory()) continue;
@@ -751,6 +771,7 @@ function listOpenClawSessionEntries() {
         const file = path.resolve(sessionsDir, entry.sessionFile);
         if (file.startsWith(OPENCLAW_AGENTS_DIR + path.sep) && file.endsWith('.jsonl') && fs.existsSync(file)) {
           keyToSessionId.set(sessionKey, entry.sessionId || path.basename(file, '.jsonl'));
+          keyToFile.set(sessionKey, file);
           indexed.push({ file, metadata: { ...entry, sessionKey, agentId: agent.name } });
         }
       }
@@ -779,6 +800,7 @@ function listOpenClawSessionEntries() {
       parentSessionKey: entry.metadata.spawnedBy || (run && (run.requesterSessionKey || run.controllerSessionKey)) || null,
     };
     metadata.parentSessionId = keyToSessionId.get(metadata.parentSessionKey) || null;
+    metadata.parentFile = keyToFile.get(metadata.parentSessionKey) || null;
     const previous = entriesByFile.get(entry.file);
     // 同一 transcript 存在多个别名时，保留包含 subagent 语义的会话键。
     if (!previous || metadata.sessionKey.includes(':subagent:') || !previous.metadata.sessionKey) {
@@ -808,8 +830,13 @@ function decorateOpenClawSummary(summary, metadata = {}) {
     sessionKind,
     parentSessionKey: metadata.parentSessionKey || null,
     parentSessionId: metadata.parentSessionId || null,
+    parentFile: metadata.parentFile || null,
     channel: metadata.channel || metadata.lastChannel || null,
     openClawStatus: metadata.status || null,
+    startedTs: metadata.startedAt || metadata.sessionStartedAt
+      ? new Date(metadata.startedAt || metadata.sessionStartedAt).toISOString()
+      : summary.firstTs,
+    endedTs: metadata.endedAt ? new Date(metadata.endedAt).toISOString() : null,
   };
 }
 
@@ -970,12 +997,23 @@ function detailClaude(file, content) {
   const msgs = [];
   for (const l of lines) {
     if (l.isSidechain && !isSubagent) continue;
+    if (!isSubagent && l.type === 'user' && l.toolUseResult && l.toolUseResult.agentId &&
+        (l.toolUseResult.isAsync || l.toolUseResult.status === 'async_launched')) {
+      msgs.push({
+        role: 'subagent', event: 'started', agentId: l.toolUseResult.agentId,
+        title: l.toolUseResult.description || l.toolUseResult.agentId,
+        text: 'Agent 已创建', ts: l.timestamp,
+      });
+      continue;
+    }
     if (l.type === 'summary' && l.summary) {
       msgs.push({ role: 'divider', text: '摘要: ' + l.summary, ts: null });
     } else if (l.type === 'user' && l.message && !l.isMeta) {
       const c = l.message.content;
       if (typeof c === 'string') {
-        if (!isNoiseUserText(c)) msgs.push({ role: 'user', text: c, ts: l.timestamp });
+        const notification = !isSubagent && parseClaudeTaskNotification(c);
+        if (notification) msgs.push({ ...notification, ts: l.timestamp });
+        else if (!isNoiseUserText(c)) msgs.push({ role: 'user', text: c, ts: l.timestamp });
       } else if (Array.isArray(c)) {
         for (const item of c) {
           if (item.type === 'text' && item.text && !isNoiseUserText(item.text)) {
@@ -1066,6 +1104,76 @@ function detailOpenClaw(file, content) {
   return msgs;
 }
 
+let subagentSessionsByParentFile = new Map();
+
+function subagentLink(summary) {
+  return {
+    source: summary.source,
+    id: summary.id,
+    file: summary.file,
+    project: summary.project,
+    title: summary.title,
+    firstTs: summary.firstTs,
+    lastTs: summary.lastTs,
+    turns: summary.turns,
+    model: summary.model,
+    models: summary.models,
+    contextTokens: summary.contextTokens,
+    usage: summary.usage,
+    cost: summary.cost,
+    status: summary.status,
+    sessionKind: 'subagent',
+    subagentType: summary.subagentType || null,
+  };
+}
+
+function subagentEventId(summary) {
+  if (summary.source === 'openclaw') return summary.sessionKey && summary.sessionKey.split(':').pop() || summary.id;
+  return summary.agentId || summary.id;
+}
+
+function attachSubagentEvents(messages, parentFile) {
+  const children = subagentSessionsByParentFile.get(parentFile) || [];
+  if (!children.length) return messages;
+  const byId = new Map();
+  for (const child of children) {
+    for (const id of [subagentEventId(child), child.id]) {
+      if (id) byId.set(id, child);
+    }
+  }
+
+  const events = messages.map(message => {
+    if (message.role !== 'subagent') return message;
+    const child = byId.get(message.agentId);
+    return child ? { ...message, title: message.title || child.title, subagent: subagentLink(child) } : message;
+  });
+  const seen = new Set(events.filter(m => m.role === 'subagent').map(m => `${m.agentId}:${m.event}`));
+
+  for (const child of children) {
+    const agentId = subagentEventId(child);
+    if (!seen.has(`${agentId}:started`)) {
+      events.push({
+        role: 'subagent', event: 'started', agentId, title: child.title,
+        text: 'Agent 已创建', ts: child.startedTs || child.firstTs,
+        subagent: subagentLink(child),
+      });
+    }
+    const finished = ['done', 'failed', 'timeout', 'cancelled', 'aborted'].includes(child.openClawStatus);
+    if (child.source === 'openclaw' && finished && !seen.has(`${agentId}:completed`)) {
+      events.push({
+        role: 'subagent', event: child.openClawStatus === 'done' ? 'completed' : child.openClawStatus,
+        agentId, title: child.title, text: 'Agent 已完成', ts: child.endedTs || child.lastTs,
+        subagent: subagentLink(child),
+      });
+    }
+  }
+
+  return events.map((message, index) => ({ message, index })).sort((a, b) => {
+    if (!a.message.ts || !b.message.ts) return a.index - b.index;
+    return Date.parse(a.message.ts) - Date.parse(b.message.ts) || a.index - b.index;
+  }).map(item => item.message);
+}
+
 // ---------- API ----------
 
 async function apiSessions() {
@@ -1105,9 +1213,18 @@ async function apiSessions() {
 
   sessions.push(...hermesSessions()); // hermes 的状态在读取时已确定
 
+  const nextSubagentIndex = new Map();
+  for (const s of sessions) {
+    if (s.sessionKind !== 'subagent' || !s.parentFile) continue;
+    if (!nextSubagentIndex.has(s.parentFile)) nextSubagentIndex.set(s.parentFile, []);
+    nextSubagentIndex.get(s.parentFile).push(s);
+  }
+  subagentSessionsByParentFile = nextSubagentIndex;
+  const listedSessions = sessions.filter(s => s.sessionKind !== 'subagent');
+
   // 按项目 (cwd) 分组
   const groups = new Map();
-  for (const s of sessions) {
+  for (const s of listedSessions) {
     if (!groups.has(s.project)) groups.set(s.project, []);
     groups.get(s.project).push(s);
   }
@@ -1155,7 +1272,8 @@ function apiSessionDetail(query) {
   if ((!inClaude && !inCodex && !inOpenClaw) || !resolved.endsWith('.jsonl')) throw httpError(403, 'forbidden path');
   if (!fs.existsSync(resolved)) throw httpError(404, 'not found');
   const source = inClaude ? 'claude' : inCodex ? 'codex' : 'openclaw';
-  const messages = inClaude ? detailClaude(resolved) : inCodex ? detailCodex(resolved) : detailOpenClaw(resolved);
+  let messages = inClaude ? detailClaude(resolved) : inCodex ? detailCodex(resolved) : detailOpenClaw(resolved);
+  messages = attachSubagentEvents(messages, resolved);
   return { file: resolved, source, messages };
 }
 

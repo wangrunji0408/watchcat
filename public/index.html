@@ -63,6 +63,14 @@
   .msg .bubble { padding: 8px 12px; border-radius: 8px; word-break: break-word; }
   .msg.user .bubble { background: #26314a; border: 1px solid #35476b; }
   .msg.assistant .bubble { background: var(--panel); border: 1px solid var(--border); }
+  .msg.subagent-event .meta { color: var(--openclaw); }
+  .subagent-card { display: block; width: 100%; max-width: 900px; text-align: left; color: var(--text);
+    font: inherit; background: rgba(242,140,87,.08); border: 1px solid rgba(242,140,87,.35);
+    padding: 9px 12px; border-radius: 8px; }
+  button.subagent-card { cursor: pointer; }
+  button.subagent-card:hover { background: rgba(242,140,87,.14); border-color: var(--openclaw); }
+  .subagent-card-title { font-weight: 600; }
+  .subagent-card-sub { margin-top: 2px; color: var(--dim); font-size: 12px; }
   .msg.thinking .bubble, .msg.tool_use .bubble, .msg.tool_result .bubble {
     background: transparent; border: 1px dashed var(--border); color: var(--dim); font-size: 12.5px;
     font-family: ui-monospace, Menlo, monospace; }
@@ -125,6 +133,7 @@
   .detail-metrics { margin-top: 2px; color: var(--dim); font-size: 11px; }
   .back-btn { display: none; flex-shrink: 0; background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; font-size: 14px; cursor: pointer; }
+  .back-btn.child-back { display: block; }
 
   @media (max-width: 800px) {
     header { flex-wrap: wrap; gap: 6px 10px; padding: 8px 12px; padding-top: calc(8px + env(safe-area-inset-top)); }
@@ -162,6 +171,8 @@
 <script>
 const state = {
   activeFile: null,
+  activeSession: null,
+  detailStack: [],
   collapsed: new Set(),
   knownProjects: new Set(),
   expandedDetails: new Set(),
@@ -476,7 +487,7 @@ function sessionRow(s, showProject) {
   logoWrap.innerHTML = LOGOS[s.source] || '';
   logoWrap.title = SRC_NAMES[s.source] || s.source;
   row.appendChild(logoWrap.firstChild || logoWrap);
-  row.onclick = () => openSession(s);
+  row.onclick = () => openRootSession(s);
   return row;
 }
 
@@ -546,11 +557,31 @@ function toggleGroup(key) {
 function closeDetail() {
   document.body.classList.remove('detail-open');
   state.activeFile = null;
+  state.activeSession = null;
+  state.detailStack = [];
   renderSidebar();
+}
+
+function openRootSession(s) {
+  state.detailStack = [];
+  openSession(s);
+}
+
+function openSubagent(s) {
+  if (!s || !s.file) return;
+  if (state.activeSession) state.detailStack.push(state.activeSession);
+  openSession(s);
+}
+
+function navigateBack() {
+  const parent = state.detailStack.pop();
+  if (parent) openSession(parent);
+  else closeDetail();
 }
 
 async function openSession(s, keepScroll) {
   state.activeFile = s.file;
+  state.activeSession = s;
   renderSidebar();
   document.body.classList.add('detail-open');
   const main = document.getElementById('main');
@@ -562,12 +593,13 @@ async function openSession(s, keepScroll) {
     if (state.activeFile !== s.file) return; // 用户已切换
     main.innerHTML = '';
     const head = el('div', 'detail-head');
-    const back = el('button', 'back-btn', '‹ 返回');
-    back.onclick = closeDetail;
+    const back = el('button', 'back-btn' + (state.detailStack.length ? ' child-back' : ''), '‹ 返回');
+    back.onclick = navigateBack;
     head.appendChild(back);
     const summary = el('div', 'detail-summary');
     summary.appendChild(el('div', null, (SRC_NAMES[s.source] || s.source) + ' · ' + s.title));
     const metrics = [];
+    if (s.id) metrics.push('Session ID ' + s.id);
     if (s.model) metrics.push('模型 ' + s.model + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));
     if (s.contextTokens != null) metrics.push(fmtK(s.contextTokens) + ' ctx');
     if (s.usage) metrics.push(costText(s.cost));
@@ -579,6 +611,26 @@ async function openSession(s, keepScroll) {
     const roleNames = { user: '用户', assistant: '助手' };
     for (let i = 0; i < data.messages.length;) {
       const m = data.messages[i];
+      if (m.role === 'subagent') {
+        const eventNames = {
+          started: 'Agent 已创建', completed: 'Agent 完成', failed: 'Agent 失败',
+          timeout: 'Agent 超时', cancelled: 'Agent 已取消', aborted: 'Agent 已中止',
+        };
+        const box = el('div', 'msg subagent-event');
+        box.appendChild(el('div', 'meta', (eventNames[m.event] || 'Agent 状态') + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
+        const card = el(m.subagent ? 'button' : 'div', 'subagent-card');
+        if (m.subagent) card.type = 'button';
+        card.appendChild(el('div', 'subagent-card-title', m.title || m.agentId || 'Subagent'));
+        const details = [];
+        if (m.subagent && m.subagent.model) details.push(m.subagent.model);
+        if (m.subagent) details.push('点击查看 subagent 记录');
+        card.appendChild(el('div', 'subagent-card-sub', details.join(' · ') || m.text || ''));
+        if (m.subagent) card.onclick = () => openSubagent(m.subagent);
+        box.appendChild(card);
+        main.appendChild(box);
+        i++;
+        continue;
+      }
       if (m.role === 'thinking' || m.role === 'tool_use' || m.role === 'tool_result') {
         let end = i + 1;
         while (end < data.messages.length && ['thinking', 'tool_use', 'tool_result'].includes(data.messages[end].role)) end++;
@@ -603,8 +655,11 @@ async function openSession(s, keepScroll) {
 function findActive() {
   if (!state.data || !state.activeFile) return null;
   for (const p of state.data.projects)
-    for (const s of p.sessions) if (s.file === state.activeFile) return s;
-  return null;
+    for (const s of p.sessions) if (s.file === state.activeFile) {
+      state.activeSession = s;
+      return s;
+    }
+  return state.activeSession;
 }
 
 refresh();
