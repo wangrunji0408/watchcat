@@ -1,6 +1,6 @@
 # 🐈 Watchcat
 
-局域网可访问的本机 Agent 会话监控面板。扫描本机上 **Claude Code**、**Codex** 和 **Hermes** 的 session log，按项目分组展示，并实时显示运行状态。
+局域网可访问的本机 Agent 会话监控面板。扫描本机上 **Claude Code**、**Codex**、**OpenClaw** 和 **Hermes** 的 session log，按项目分组展示，并实时显示运行状态。
 
 ## 启动
 
@@ -18,11 +18,12 @@ npm start
 ## 功能
 
 - **数据来源**
-  - Claude Code：`~/.claude/projects/*/*.jsonl`
+  - Claude Code：`~/.claude/projects/*/*.jsonl`，以及各会话下的 `subagents/agent-*.jsonl`；子代理会关联父会话并显示任务 description/type
   - Codex（CLI / Desktop）：`~/.codex/sessions/**/*.jsonl`
+  - OpenClaw：`${OPENCLAW_STATE_DIR:-~/.openclaw}/agents/*/sessions/*.jsonl`；识别 agent、subagent、ACP 与 cron 会话，subagent 使用索引中的 label 并关联父会话
   - Remote SSH：自动从 Codex Desktop 的活跃 SSH 连接发现远端主机，同时读取远端 Codex `$CODEX_HOME/sessions/**/*.jsonl` 和 Claude Code `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/*.jsonl`；也可用 `WATCHCAT_SSH_HOSTS=host1,host2` 显式配置
   - Hermes：`~/.hermes/state.db`（只读打开 SQLite，需 Node ≥ 22.5 内置 `node:sqlite`，低版本自动跳过）
-- **按项目分组**：以会话记录中的 `cwd` 为项目维度；Hermes 会话无 cwd 时按来源渠道分组（如 `hermes://telegram`、`hermes://weixin`）。最近活动的项目排前，有运行中会话的项目置顶。
+- **按项目分组**：以会话记录中的 `cwd` 为项目维度；Hermes 会话无 cwd 时按来源渠道分组（如 `hermes://telegram`、`hermes://weixin`）。最近活动的项目排前，有运行中会话的项目置顶；网页中的项目列表默认折叠。
 - **运行状态**（每 5 秒自动刷新）
   - 🟢 运行中：日志文件在最近 1 分钟内有写入，或被存活进程持有且 2 分钟内有活动；Hermes 以 gateway 进程存活 + 2 分钟内有新消息判定
   - 🟡 进程存活：进程仍持有日志文件句柄（`lsof`）但近期无输出；Hermes 为 gateway 存活且会话未标记结束

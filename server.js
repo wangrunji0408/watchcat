@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Watchcat: 局域网可访问的 Claude Code / Codex 会话日志监控服务
+// Watchcat: 局域网可访问的 Claude Code / Codex / OpenClaw 会话日志监控服务
 // 安装依赖后可直接 `node server.js` 启动
 
 const http = require('http');
@@ -12,6 +12,8 @@ const PORT = parseInt(process.env.PORT || '3789', 10);
 const HOME = os.homedir();
 const CLAUDE_DIR = path.join(HOME, '.claude', 'projects');
 const CODEX_DIR = path.join(HOME, '.codex', 'sessions');
+const OPENCLAW_DIR = path.resolve(process.env.OPENCLAW_STATE_DIR || path.join(HOME, '.openclaw'));
+const OPENCLAW_AGENTS_DIR = path.join(OPENCLAW_DIR, 'agents');
 const HERMES_DB = path.join(HOME, '.hermes', 'state.db');
 const HERMES_PID_FILE = path.join(HOME, '.hermes', 'gateway.pid');
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -207,7 +209,7 @@ let openFilesCache = { at: 0, files: new Set() };
 function getOpenJsonlFiles() {
   return new Promise((resolve) => {
     if (Date.now() - openFilesCache.at < 3000) return resolve(openFilesCache.files);
-    execFile('lsof', ['-F', 'n', '-c', 'claude', '-c', 'codex', '-c', 'node'],
+    execFile('lsof', ['-F', 'n', '-c', 'claude', '-c', 'codex', '-c', 'openclaw', '-c', 'node'],
       { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
         const files = new Set();
         if (stdout) {
@@ -253,9 +255,12 @@ function extractText(content) {
 // Claude Code 会话摘要
 function summarizeClaude(file, stat, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  const isSubagent = path.basename(path.dirname(file)) === 'subagents';
   let cwd = null, firstUserText = null, summaryTitle = null, gitBranch = null, version = null, model = null;
   let firstTs = null, lastTs = null, userCount = 0, assistantCount = 0, lastEventText = null;
   let sessionId = path.basename(file, '.jsonl');
+  let agentId = isSubagent ? path.basename(file, '.jsonl').replace(/^agent-/, '') : null;
+  let parentSessionId = null, subagentType = null;
   let contextTokens = null;
   const models = new Set();
   const usageByMessage = new Map();
@@ -265,16 +270,20 @@ function summarizeClaude(file, stat, content) {
     if (l.cwd && !cwd) cwd = l.cwd;
     if (l.gitBranch) gitBranch = l.gitBranch;
     if (l.version) version = l.version;
-    if (l.sessionId) sessionId = l.sessionId;
+    if (isSubagent) {
+      agentId = l.agentId || agentId;
+      parentSessionId = l.sessionId || parentSessionId;
+      subagentType = l.attributionAgent || subagentType;
+    } else if (l.sessionId) sessionId = l.sessionId;
     if (l.type === 'summary' && l.summary) summaryTitle = l.summary;
-    if (l.type === 'user' && l.message && !l.isSidechain && !l.isMeta) {
+    if (l.type === 'user' && l.message && (!l.isSidechain || isSubagent) && !l.isMeta) {
       const text = extractText(l.message.content);
       if (text && !isNoiseUserText(text)) {
         userCount++;
         if (!firstUserText) firstUserText = text;
       }
     }
-    if (l.type === 'assistant' && l.message && !l.isSidechain) {
+    if (l.type === 'assistant' && l.message && (!l.isSidechain || isSubagent)) {
       if (l.message.model && l.message.model !== '<synthetic>') {
         model = l.message.model;
         models.add(model);
@@ -299,9 +308,11 @@ function summarizeClaude(file, stat, content) {
 
   return {
     source: 'claude',
-    id: sessionId,
+    id: isSubagent ? agentId : sessionId,
     file,
-    project: cwd || decodeClaudeDirName(path.basename(path.dirname(file))),
+    project: cwd || decodeClaudeDirName(path.basename(isSubagent
+      ? path.dirname(path.dirname(path.dirname(file)))
+      : path.dirname(file))),
     title: truncate(summaryTitle || firstUserText || '(无标题)', 80),
     lastMessage: truncate(lastEventText || '', 120),
     firstTs, lastTs,
@@ -313,12 +324,88 @@ function summarizeClaude(file, stat, content) {
     usage: totals.usage,
     cost: totals.cost,
     sizeBytes: stat.size,
+    sessionKind: isSubagent ? 'subagent' : 'agent',
+    agentId,
+    parentSessionId,
+    parentFile: isSubagent && parentSessionId
+      ? path.join(path.dirname(path.dirname(path.dirname(file))), parentSessionId + '.jsonl')
+      : null,
+    subagentType,
   };
 }
 
 // 目录名如 -Users-wangrunji-Codes-foo,尽力还原(仅作 cwd 缺失时的兜底)
 function decodeClaudeDirName(name) {
   return name.replace(/-/g, '/');
+}
+
+function listClaudeSessionFiles() {
+  const files = [];
+  for (const project of safeReadDir(CLAUDE_DIR)) {
+    if (!project.isDirectory()) continue;
+    const projectDir = path.join(CLAUDE_DIR, project.name);
+    for (const entry of safeReadDir(projectDir)) {
+      if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        files.push(path.join(projectDir, entry.name));
+      } else if (entry.isDirectory()) {
+        const subagentsDir = path.join(projectDir, entry.name, 'subagents');
+        for (const subagent of safeReadDir(subagentsDir)) {
+          if (subagent.isFile() && /^agent-[\w-]+\.jsonl$/.test(subagent.name)) {
+            files.push(path.join(subagentsDir, subagent.name));
+          }
+        }
+      }
+    }
+  }
+  return files;
+}
+
+const claudeSubagentMetaCache = new Map();
+
+function claudeSubagentMetadata(parentFile, agentId) {
+  let stat;
+  try { stat = fs.statSync(parentFile); } catch { return null; }
+  let cached = claudeSubagentMetaCache.get(parentFile);
+  if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+    const calls = new Map();
+    const agents = new Map();
+    for (const l of parseLines(parentFile)) {
+      const content = l.message && Array.isArray(l.message.content) ? l.message.content : [];
+      if (l.type === 'assistant') {
+        for (const item of content) {
+          if (item.type === 'tool_use' && (item.name === 'Agent' || item.name === 'Task')) {
+            calls.set(item.id, item.input || {});
+          }
+        }
+      } else if (l.type === 'user') {
+        for (const item of content) {
+          if (item.type !== 'tool_result') continue;
+          const text = typeof item.content === 'string' ? item.content : extractText(item.content);
+          const input = calls.get(item.tool_use_id) || {};
+          for (const match of text.matchAll(/\bagentId:\s*([\w-]+)/g)) {
+            agents.set(match[1], {
+              label: input.description || null,
+              prompt: input.prompt || null,
+              subagentType: input.subagent_type || null,
+            });
+          }
+        }
+      }
+    }
+    cached = { mtimeMs: stat.mtimeMs, size: stat.size, agents };
+    claudeSubagentMetaCache.set(parentFile, cached);
+  }
+  return cached.agents.get(agentId) || null;
+}
+
+function decorateClaudeSubagentSummary(summary) {
+  if (summary.sessionKind !== 'subagent') return summary;
+  const metadata = summary.parentFile && claudeSubagentMetadata(summary.parentFile, summary.agentId);
+  return {
+    ...summary,
+    title: truncate(metadata && (metadata.label || metadata.prompt) || summary.title, 80),
+    subagentType: metadata && metadata.subagentType || summary.subagentType,
+  };
 }
 
 // Codex 会话摘要
@@ -366,6 +453,79 @@ function summarizeCodex(file, stat, content) {
     turns: userCount + agentCount,
     gitBranch: null,
     version: source,
+    model,
+    models: [...models],
+    contextTokens,
+    usage: totals.usage,
+    cost: totals.cost,
+    sizeBytes: stat.size,
+  };
+}
+
+// OpenClaw 会话摘要（~/.openclaw/agents/<agent>/sessions/<uuid>.jsonl）
+function summarizeOpenClaw(file, stat, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  let cwd = null, sessionId = path.basename(file, '.jsonl'), provider = null, model = null;
+  let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
+  let userCount = 0, agentCount = 0, contextTokens = null;
+  const models = new Set();
+  const usageRecords = [];
+
+  for (const l of lines) {
+    if (l.timestamp) { if (!firstTs) firstTs = l.timestamp; lastTs = l.timestamp; }
+    if (l.type === 'session') {
+      cwd = l.cwd || cwd;
+      sessionId = l.id || sessionId;
+    }
+    if (l.type === 'model_change') {
+      provider = l.provider || provider;
+      if (l.modelId) { model = l.modelId; models.add(model); }
+    }
+    if (l.type !== 'message' || !l.message) continue;
+    const m = l.message;
+    const text = extractText(m.content);
+    if (m.role === 'user' && text && !isNoiseUserText(text)) {
+      userCount++;
+      if (!firstUserText) firstUserText = text;
+    } else if (m.role === 'assistant') {
+      provider = m.provider || provider;
+      if (m.model && m.model !== '<synthetic>') {
+        model = m.model;
+        models.add(model);
+      }
+      if (text) { agentCount++; lastAgentText = text; }
+      else if (Array.isArray(m.content) && m.content.length) agentCount++;
+      if (m.usage) {
+        contextTokens = Number(m.usage.totalTokens ?? m.usage.total_tokens) || contextTokens;
+        usageRecords.push({
+          model,
+          usage: normalizedUsage({
+            input_tokens: m.usage.input ?? m.usage.input_tokens,
+            output_tokens: m.usage.output ?? m.usage.output_tokens,
+            cache_read_input_tokens: m.usage.cacheRead ?? m.usage.cache_read_input_tokens,
+            cache_write_tokens: m.usage.cacheWrite ?? m.usage.cache_write_tokens,
+            reasoning_tokens: m.usage.reasoning ?? m.usage.reasoning_tokens,
+          }, 'openclaw'),
+        });
+      }
+    }
+  }
+  if (!firstUserText && !agentCount) return null;
+  const totals = summarizeUsageRecords(usageRecords);
+  const relative = path.relative(OPENCLAW_AGENTS_DIR, file).split(path.sep);
+  const agentId = relative.length >= 3 ? relative[0] : null;
+
+  return {
+    source: 'openclaw',
+    id: sessionId,
+    file,
+    project: cwd || (agentId ? `openclaw://${agentId}` : 'openclaw://unknown'),
+    title: truncate(firstUserText || '(无标题)', 80),
+    lastMessage: truncate(lastAgentText || '', 120),
+    firstTs, lastTs,
+    turns: userCount + agentCount,
+    gitBranch: null,
+    version: agentId || provider,
     model,
     models: [...models],
     contextTokens,
@@ -574,6 +734,85 @@ async function remoteAgentSessions() {
   return remoteSessionsCache;
 }
 
+function listOpenClawSessionEntries() {
+  const entriesByFile = new Map();
+  const keyToSessionId = new Map();
+  const indexed = [];
+  for (const agent of safeReadDir(OPENCLAW_AGENTS_DIR)) {
+    if (!agent.isDirectory()) continue;
+    const sessionsDir = path.join(OPENCLAW_AGENTS_DIR, agent.name, 'sessions');
+
+    // sessions.json 是当前会话索引；优先采用其中的显式路径。
+    try {
+      const index = JSON.parse(fs.readFileSync(path.join(sessionsDir, 'sessions.json'), 'utf8'));
+      const entries = Array.isArray(index) ? index.map((entry, i) => [String(i), entry]) : Object.entries(index || {});
+      for (const [sessionKey, entry] of entries) {
+        if (!entry || typeof entry.sessionFile !== 'string') continue;
+        const file = path.resolve(sessionsDir, entry.sessionFile);
+        if (file.startsWith(OPENCLAW_AGENTS_DIR + path.sep) && file.endsWith('.jsonl') && fs.existsSync(file)) {
+          keyToSessionId.set(sessionKey, entry.sessionId || path.basename(file, '.jsonl'));
+          indexed.push({ file, metadata: { ...entry, sessionKey, agentId: agent.name } });
+        }
+      }
+    } catch { /* 索引缺失或正在写入时仍扫描标准 UUID 文件 */ }
+
+    // 同时保留已从索引移除但仍存在的历史会话；排除 trajectory/checkpoint/reset 等旁路日志。
+    for (const entry of safeReadDir(sessionsDir)) {
+      if (entry.isFile() && /^[0-9a-f]{8}-[0-9a-f-]{27,}\.jsonl$/i.test(entry.name)) {
+        const file = path.join(sessionsDir, entry.name);
+        if (!entriesByFile.has(file)) entriesByFile.set(file, { file, metadata: { agentId: agent.name } });
+      }
+    }
+  }
+
+  let runsByChild = new Map();
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(OPENCLAW_DIR, 'subagents', 'runs.json'), 'utf8'));
+    runsByChild = new Map(Object.values(data.runs || {}).filter(Boolean).map(run => [run.childSessionKey, run]));
+  } catch { /* subagent 运行索引是可选的 */ }
+
+  for (const entry of indexed) {
+    const run = runsByChild.get(entry.metadata.sessionKey);
+    const metadata = {
+      ...entry.metadata,
+      task: run && run.task,
+      parentSessionKey: entry.metadata.spawnedBy || (run && (run.requesterSessionKey || run.controllerSessionKey)) || null,
+    };
+    metadata.parentSessionId = keyToSessionId.get(metadata.parentSessionKey) || null;
+    const previous = entriesByFile.get(entry.file);
+    // 同一 transcript 存在多个别名时，保留包含 subagent 语义的会话键。
+    if (!previous || metadata.sessionKey.includes(':subagent:') || !previous.metadata.sessionKey) {
+      entriesByFile.set(entry.file, { file: entry.file, metadata });
+    }
+  }
+  return [...entriesByFile.values()];
+}
+
+function decorateOpenClawSummary(summary, metadata = {}) {
+  const sessionKey = metadata.sessionKey || '';
+  let sessionKind = 'agent';
+  if (sessionKey.includes(':subagent:')) sessionKind = 'subagent';
+  else if (sessionKey.includes(':acp:')) sessionKind = 'acp';
+  else if (sessionKey.includes(':cron:')) sessionKind = 'cron';
+  const title = sessionKind === 'subagent'
+    ? truncate(metadata.label || metadata.task || summary.title, 80)
+    : summary.title;
+  return {
+    ...summary,
+    title,
+    model: summary.model || metadata.model || null,
+    models: summary.models.length ? summary.models : (metadata.model ? [metadata.model] : []),
+    version: metadata.agentId || summary.version,
+    agentId: metadata.agentId || null,
+    sessionKey: metadata.sessionKey || null,
+    sessionKind,
+    parentSessionKey: metadata.parentSessionKey || null,
+    parentSessionId: metadata.parentSessionId || null,
+    channel: metadata.channel || metadata.lastChannel || null,
+    openClawStatus: metadata.status || null,
+  };
+}
+
 function getSummary(file, kind) {
   let stat;
   try { stat = fs.statSync(file); } catch { return null; }
@@ -581,7 +820,9 @@ function getSummary(file, kind) {
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.summary;
   let summary = null;
   try {
-    summary = kind === 'claude' ? summarizeClaude(file, stat) : summarizeCodex(file, stat);
+    if (kind === 'claude') summary = summarizeClaude(file, stat);
+    else if (kind === 'openclaw') summary = summarizeOpenClaw(file, stat);
+    else summary = summarizeCodex(file, stat);
   } catch (e) {
     summary = null;
   }
@@ -725,9 +966,10 @@ function detailHermes(sessionId) {
 
 function detailClaude(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  const isSubagent = path.basename(path.dirname(file)) === 'subagents';
   const msgs = [];
   for (const l of lines) {
-    if (l.isSidechain) continue;
+    if (l.isSidechain && !isSubagent) continue;
     if (l.type === 'summary' && l.summary) {
       msgs.push({ role: 'divider', text: '摘要: ' + l.summary, ts: null });
     } else if (l.type === 'user' && l.message && !l.isMeta) {
@@ -788,30 +1030,63 @@ function detailCodex(file, content) {
   return msgs;
 }
 
+function detailOpenClaw(file, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  const msgs = [];
+  for (const l of lines) {
+    if (l.type !== 'message' || !l.message) continue;
+    const m = l.message;
+    const ts = l.timestamp || (m.timestamp ? new Date(m.timestamp).toISOString() : null);
+    if (m.role === 'user') {
+      const text = extractText(m.content);
+      if (text && !isNoiseUserText(text)) msgs.push({ role: 'user', text, ts });
+    } else if (m.role === 'assistant') {
+      if (typeof m.content === 'string' && m.content) {
+        msgs.push({ role: 'assistant', text: m.content, ts });
+        continue;
+      }
+      for (const item of Array.isArray(m.content) ? m.content : []) {
+        if (item.type === 'text' && item.text) {
+          msgs.push({ role: 'assistant', text: item.text, ts });
+        } else if (item.type === 'thinking' && item.thinking) {
+          msgs.push({ role: 'thinking', text: truncate(item.thinking, 600), ts });
+        } else if (item.type === 'toolCall') {
+          const raw = item.arguments ?? item.input ?? {};
+          const input = truncate(typeof raw === 'string' ? raw : JSON.stringify(raw), 400);
+          msgs.push({ role: 'tool_use', ts, toolName: item.name || '?', callId: item.id || null,
+            input, text: (item.name || '?') + ' ' + input });
+        }
+      }
+    } else if (m.role === 'toolResult') {
+      const output = truncate(extractText(m.content), 600);
+      msgs.push({ role: 'tool_result', ts, toolName: m.toolName || '?', callId: m.toolCallId || null,
+        output, text: output });
+    }
+  }
+  return msgs;
+}
+
 // ---------- API ----------
 
 async function apiSessions() {
-  const claudeFiles = [];
-  for (const ent of safeReadDir(CLAUDE_DIR)) {
-    if (!ent.isDirectory()) continue;
-    for (const f of safeReadDir(path.join(CLAUDE_DIR, ent.name))) {
-      if (f.isFile() && f.name.endsWith('.jsonl')) {
-        claudeFiles.push(path.join(CLAUDE_DIR, ent.name, f.name));
-      }
-    }
-  }
+  const claudeFiles = listClaudeSessionFiles();
   const codexFiles = listFilesRecursive(CODEX_DIR, '.jsonl');
+  const openClawEntries = listOpenClawSessionEntries();
   const openFiles = await getOpenJsonlFiles();
   const now = Date.now();
 
   const sessions = [];
   for (const f of claudeFiles) {
     const s = getSummary(f, 'claude');
-    if (s) sessions.push(s);
+    if (s) sessions.push(decorateClaudeSubagentSummary(s));
   }
   for (const f of codexFiles) {
     const s = getSummary(f, 'codex');
     if (s) sessions.push(s);
+  }
+  for (const { file, metadata } of openClawEntries) {
+    const s = getSummary(file, 'openclaw');
+    if (s) sessions.push(decorateOpenClawSummary(s, metadata));
   }
 
   const remote = await remoteAgentSessions();
@@ -876,10 +1151,12 @@ function apiSessionDetail(query) {
   const resolved = path.resolve(file);
   const inClaude = resolved.startsWith(CLAUDE_DIR + path.sep);
   const inCodex = resolved.startsWith(CODEX_DIR + path.sep);
-  if ((!inClaude && !inCodex) || !resolved.endsWith('.jsonl')) throw httpError(403, 'forbidden path');
+  const inOpenClaw = resolved.startsWith(OPENCLAW_AGENTS_DIR + path.sep);
+  if ((!inClaude && !inCodex && !inOpenClaw) || !resolved.endsWith('.jsonl')) throw httpError(403, 'forbidden path');
   if (!fs.existsSync(resolved)) throw httpError(404, 'not found');
-  const messages = inClaude ? detailClaude(resolved) : detailCodex(resolved);
-  return { file: resolved, source: inClaude ? 'claude' : 'codex', messages };
+  const source = inClaude ? 'claude' : inCodex ? 'codex' : 'openclaw';
+  const messages = inClaude ? detailClaude(resolved) : inCodex ? detailCodex(resolved) : detailOpenClaw(resolved);
+  return { file: resolved, source, messages };
 }
 
 function httpError(code, msg) { const e = new Error(msg); e.statusCode = code; return e; }
@@ -939,6 +1216,8 @@ if (require.main === module) {
 module.exports = {
   apiSessions,
   apiSessionDetail,
+  detailClaude,
+  detailOpenClaw,
   discoverRemoteHosts,
   normalizeModelName,
   normalizedUsage,
@@ -947,5 +1226,7 @@ module.exports = {
   remoteAgentSessions,
   summarizeClaude,
   summarizeCodex,
+  summarizeOpenClaw,
+  decorateOpenClawSummary,
   summarizeUsageRecords,
 };

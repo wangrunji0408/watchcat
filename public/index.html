@@ -10,7 +10,7 @@
     --bg: #0f1117; --panel: #171a23; --panel2: #1e2230; --border: #2a2f3f;
     --text: #d8dce8; --dim: #8a91a5; --accent: #7aa2f7;
     --green: #9ece6a; --yellow: #e0af68; --gray: #565f89;
-    --claude: #d97757; --codex: #e8e8ec; --hermes: #bb9af7;
+    --claude: #d97757; --codex: #e8e8ec; --openclaw: #f28c57; --hermes: #bb9af7;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; }
@@ -53,6 +53,7 @@
   .session-proj { color: var(--accent); }
   .ctx { color: var(--accent); }
   .model { color: var(--dim); }
+  .subagent-tag { color: var(--openclaw); }
   .cost { color: var(--green); }
   .cost.unknown { color: var(--dim); }
   .logo { width: 18px; height: 18px; flex-shrink: 0; margin-top: 2px; opacity: .9; }
@@ -159,7 +160,13 @@
 </div>
 <script src="/vendor/marked.min.js"></script>
 <script>
-const state = { activeFile: null, collapsed: new Set(), expandedDetails: new Set(), data: null };
+const state = {
+  activeFile: null,
+  collapsed: new Set(),
+  knownProjects: new Set(),
+  expandedDetails: new Set(),
+  data: null,
+};
 
 // ---------- 各来源 logo (内嵌 SVG 近似图形) ----------
 const LOGOS = {
@@ -179,6 +186,10 @@ const LOGOS = {
     }
     return '<svg class="logo" viewBox="0 0 24 24" fill="#e8e8ec">' + petals + '</svg>';
   })(),
+  // OpenClaw: 橙色蟹钳
+  openclaw: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#f28c57" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M8.5 9.5C5 8.8 3.3 6.5 4.2 4.2c2.6.2 4.5 1.7 5.3 4.3M15.5 9.5c3.5-.7 5.2-3 4.3-5.3-2.6.2-4.5 1.7-5.3 4.3"/>' +
+    '<path d="M7 10.5c0 5 1.7 8 5 9.5 3.3-1.5 5-4.5 5-9.5M9.5 13h5M12 13v7"/></svg>',
   // Hermes: 紫色羽翼
   hermes: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#bb9af7" stroke-width="1.8" stroke-linecap="round">' +
     '<path d="M20.5 5.5 C14 5.5 9.5 9.5 7.5 16.5"/>' +
@@ -186,7 +197,7 @@ const LOGOS = {
     '<path d="M19.5 12.5 C16.5 12.5 13.5 14.5 12.5 16.5"/>' +
     '<path d="M4 16.5 H14"/></svg>',
 };
-const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes' };
+const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', openclaw: 'OpenClaw', hermes: 'Hermes' };
 
 function fmtTime(ts) {
   if (!ts) return '';
@@ -406,6 +417,13 @@ async function refresh() {
   try {
     const res = await fetch('/api/sessions');
     state.data = await res.json();
+    // 新出现的项目默认折叠；用户手动展开后，自动刷新不会改变其选择。
+    for (const p of state.data.projects || []) {
+      if (!state.knownProjects.has(p.project)) {
+        state.knownProjects.add(p.project);
+        state.collapsed.add(p.project);
+      }
+    }
     renderSidebar();
   } catch (e) {
     document.getElementById('stats').textContent = '刷新失败: ' + e.message;
@@ -420,7 +438,9 @@ function sessionRow(s, showProject) {
   const row = el('div', 'session' + (s.file === state.activeFile ? ' active' : ''));
   row.appendChild(el('span', 'dot ' + s.status));
   const body = el('div', 'session-body');
-  body.appendChild(el('div', 'session-title', s.title));
+  const title = el('div', 'session-title', (s.sessionKind === 'subagent' ? '↳ ' : '') + s.title);
+  if (s.parentSessionKey || s.parentSessionId) title.title = '父会话：' + (s.parentSessionKey || s.parentSessionId);
+  body.appendChild(title);
   const sub = el('div', 'session-sub');
   const parts = [];
   if (showProject) {
@@ -429,6 +449,10 @@ function sessionRow(s, showProject) {
     sub.appendChild(document.createTextNode(' · '));
   }
   sub.appendChild(document.createTextNode(fmtTime(s.lastTs) + ' · ' + s.turns + ' 轮'));
+  if (s.sessionKind === 'subagent') {
+    sub.appendChild(document.createTextNode(' · '));
+    sub.appendChild(el('span', 'subagent-tag', 'subagent' + (s.subagentType ? '/' + s.subagentType : '')));
+  }
   if (s.model) {
     sub.appendChild(document.createTextNode(' · '));
     const model = el('span', 'model', s.model + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));

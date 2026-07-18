@@ -1,11 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const path = require('node:path');
 
 const {
+  decorateOpenClawSummary,
+  detailClaude,
+  detailOpenClaw,
   normalizeModelName,
   normalizedUsage,
   priceForModel,
   summarizeClaude,
+  summarizeOpenClaw,
   summarizeUsageRecords,
 } = require('../server');
 
@@ -64,4 +70,72 @@ test('marks models without an official catalog price as unknown', () => {
 
   assert.equal(result.cost.usd, null);
   assert.deepEqual(result.cost.unknownModels, ['unknown-model-v1']);
+});
+
+test('parses OpenClaw messages, tools, usage, and subagent metadata', () => {
+  const file = path.join(os.homedir(), '.openclaw', 'agents', 'main', 'sessions',
+    '11111111-1111-4111-8111-111111111111.jsonl');
+  const rows = [
+    { type: 'session', version: 3, id: 'session-1', timestamp: '2026-07-18T00:00:00Z', cwd: '/tmp/project' },
+    { type: 'model_change', timestamp: '2026-07-18T00:00:01Z', provider: 'anthropic', modelId: 'claude-sonnet-4-5' },
+    { type: 'message', timestamp: '2026-07-18T00:00:02Z', message: { role: 'user', content: 'build it' } },
+    { type: 'message', timestamp: '2026-07-18T00:00:03Z', message: {
+      role: 'assistant', provider: 'anthropic', model: 'claude-sonnet-4-5',
+      content: [
+        { type: 'thinking', thinking: 'plan' },
+        { type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'a.txt' } },
+      ],
+      usage: { input: 10, output: 5, cacheRead: 20, cacheWrite: 30, totalTokens: 65 },
+    } },
+    { type: 'message', timestamp: '2026-07-18T00:00:04Z', message: {
+      role: 'toolResult', toolCallId: 'call-1', toolName: 'read', content: [{ type: 'text', text: 'contents' }],
+    } },
+    { type: 'message', timestamp: '2026-07-18T00:00:05Z', message: {
+      role: 'assistant', provider: 'anthropic', model: 'claude-sonnet-4-5', content: [{ type: 'text', text: 'done' }],
+      usage: { input: 11, output: 6, cacheRead: 21, cacheWrite: 31, totalTokens: 69 },
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const raw = summarizeOpenClaw(file, { size: content.length }, content);
+  const summary = decorateOpenClawSummary(raw, {
+    agentId: 'main', sessionKey: 'agent:main:subagent:child-1', label: 'worker',
+    parentSessionKey: 'agent:main:main', parentSessionId: 'parent-1', status: 'done',
+  });
+
+  assert.equal(summary.project, '/tmp/project');
+  assert.equal(summary.title, 'worker');
+  assert.equal(summary.sessionKind, 'subagent');
+  assert.equal(summary.parentSessionId, 'parent-1');
+  assert.equal(summary.turns, 3);
+  assert.equal(summary.usage.inputTokens, 21);
+  assert.equal(summary.usage.cachedInputTokens, 41);
+  assert.equal(summary.usage.cacheWriteTokens, 61);
+  assert.equal(summary.contextTokens, 69);
+
+  const detail = detailOpenClaw(file, content);
+  assert.deepEqual(detail.map(m => m.role), ['user', 'thinking', 'tool_use', 'tool_result', 'assistant']);
+  assert.equal(detail[2].callId, 'call-1');
+  assert.equal(detail[3].output, 'contents');
+});
+
+test('parses Claude Code sidechain rows when they are in a subagent transcript', () => {
+  const file = '/tmp/project/parent-session/subagents/agent-worker-1.jsonl';
+  const rows = [
+    { type: 'user', isSidechain: true, agentId: 'worker-1', sessionId: 'parent-session',
+      cwd: '/tmp/project', timestamp: '2026-07-18T00:00:00Z', message: { content: 'inspect the code' } },
+    { type: 'assistant', isSidechain: true, agentId: 'worker-1', sessionId: 'parent-session',
+      cwd: '/tmp/project', timestamp: '2026-07-18T00:00:01Z', message: {
+        id: 'msg-1', model: 'claude-sonnet-4-5', content: [{ type: 'text', text: 'found it' }],
+        usage: { input_tokens: 10, output_tokens: 2 },
+      } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeClaude(file, { size: content.length }, content);
+
+  assert.equal(summary.id, 'worker-1');
+  assert.equal(summary.sessionKind, 'subagent');
+  assert.equal(summary.parentSessionId, 'parent-session');
+  assert.equal(summary.project, '/tmp/project');
+  assert.equal(summary.turns, 2);
+  assert.deepEqual(detailClaude(file, content).map(m => m.role), ['user', 'assistant']);
 });

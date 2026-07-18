@@ -1,7 +1,7 @@
 {
   "name": "watchcat",
   "version": "0.1.0",
-  "description": "局域网可访问的 Claude Code / Codex 会话日志监控面板",
+  "description": "局域网可访问的 Claude Code / Codex / OpenClaw 会话日志监控面板",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
