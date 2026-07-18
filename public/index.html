@@ -233,9 +233,7 @@ function fmtK(n) {
 function fmtUsd(n) {
   if (n == null || !Number.isFinite(n)) return '';
   if (n === 0) return '$0.00';
-  if (n < 0.0001) return '<$0.0001';
-  if (n < 0.01) return '$' + n.toFixed(4);
-  if (n < 1) return '$' + n.toFixed(3);
+  if (n < 0.005) return '<$0.01';
   return '$' + n.toFixed(2);
 }
 function costText(cost) {
@@ -531,8 +529,10 @@ function renderSidebar() {
     const head = el('div', 'project-head');
     head.appendChild(el('span', 'chevron', '▼'));
     head.appendChild(el('span', 'project-name', p.name));
-    const meta = el('span', 'project-meta',
-      (p.running ? '● ' + p.running + ' · ' : '') + p.sessions.length + ' 会话 · ' + fmtAge(p.lastTs));
+    let metaText = (p.running ? '● ' + p.running + ' · ' : '') + p.sessions.length + ' 会话';
+    if (p.totalCost && p.totalCost.usd != null) metaText += ' · ' + fmtUsd(p.totalCost.usd);
+    metaText += ' · ' + fmtAge(p.lastTs);
+    const meta = el('span', 'project-meta', metaText);
     if (p.running) meta.style.color = 'var(--green)';
     head.appendChild(meta);
     head.onclick = () => { toggleGroup(p.project); box.classList.toggle('collapsed'); };

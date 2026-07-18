@@ -1230,12 +1230,20 @@ async function apiSessions() {
   }
   const projects = [...groups.entries()].map(([project, list]) => {
     list.sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
+    let totalUsd = 0, incompleteCosts = 0;
+    for (const s of list) {
+      if (s.cost && s.cost.usd != null) {
+        totalUsd += s.cost.usd;
+        if (!s.cost.complete) incompleteCosts++;
+      } else if (s.usage) incompleteCosts++;
+    }
     return {
       project,
       name: project.startsWith(HOME) ? '~' + project.slice(HOME.length) : project,
       lastTs: list[0].lastTs,
       running: list.filter(s => s.status === 'running').length,
       open: list.filter(s => s.status === 'open').length,
+      totalCost: totalUsd > 0 || incompleteCosts > 0 ? { usd: totalUsd, complete: incompleteCosts === 0 } : null,
       sessions: list,
     };
   });
