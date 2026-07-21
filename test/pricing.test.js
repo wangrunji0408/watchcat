@@ -6,6 +6,7 @@ const path = require('node:path');
 const {
   decorateOpenClawSummary,
   detailClaude,
+  detailCodex,
   detailOpenClaw,
   normalizeModelName,
   normalizedUsage,
@@ -156,4 +157,29 @@ test('renders Claude Code subagent launch and completion as agent events', () =>
     ['subagent', 'completed', 'worker-2'],
   ]);
   assert.equal(detail[1].title, 'Find benchmarks');
+});
+
+test('renders context compaction events from supported logs', () => {
+  const claude = detailClaude('/tmp/project/main.jsonl', JSON.stringify({
+    type: 'system', subtype: 'compact_boundary', timestamp: '2026-07-18T00:00:00Z',
+    compactMetadata: { trigger: 'auto', preTokens: 167000, postTokens: 4200, durationMs: 1500 },
+  }));
+  assert.deepEqual(claude, [{
+    role: 'compaction', ts: '2026-07-18T00:00:00Z', trigger: 'auto',
+    beforeTokens: 167000, afterTokens: 4200, durationMs: 1500,
+  }]);
+
+  const codex = detailCodex('/tmp/session.jsonl', JSON.stringify({
+    type: 'compacted', timestamp: '2026-07-18T00:01:00Z',
+    payload: { trigger: 'manual', tokens_before: 120000, tokens_after: 5000 },
+  }));
+  assert.equal(codex[0].role, 'compaction');
+  assert.equal(codex[0].beforeTokens, 120000);
+
+  const openClaw = detailOpenClaw('/tmp/session.jsonl', JSON.stringify({
+    type: 'compaction', timestamp: '2026-07-18T00:02:00Z', fromHook: true, tokensBefore: 190000,
+  }));
+  assert.equal(openClaw[0].role, 'compaction');
+  assert.equal(openClaw[0].trigger, 'auto');
+  assert.equal(openClaw[0].beforeTokens, 190000);
 });

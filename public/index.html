@@ -123,6 +123,9 @@
   .tool-detail-value { white-space: pre-wrap; word-break: break-word; font: 12px/1.5 ui-monospace, Menlo, monospace; }
   .tool-detail-value.markdown-body { white-space: normal; font-family: inherit; }
   .msg.divider { color: var(--accent); font-size: 12px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  .msg.compaction { display: flex; align-items: center; gap: 9px; color: var(--dim); font-size: 12px; }
+  .msg.compaction::before, .msg.compaction::after { content: ''; height: 1px; background: var(--border); flex: 1; }
+  .compaction-label { white-space: nowrap; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; }
   .empty { color: var(--dim); text-align: center; margin-top: 15vh; }
   .legend { display: flex; gap: 12px; font-size: 12px; color: var(--dim); align-items: center; }
   .legend .dot { margin-top: 0; }
@@ -636,6 +639,22 @@ async function openSession(s, keepScroll) {
         while (end < data.messages.length && ['thinking', 'tool_use', 'tool_result'].includes(data.messages[end].role)) end++;
         main.appendChild(renderActivity(data.messages.slice(i, end), i, s.file));
         i = end;
+        continue;
+      }
+      if (m.role === 'compaction') {
+        const details = [];
+        if (m.trigger) details.push(m.trigger === 'auto' ? '自动' : m.trigger === 'manual' ? '手动' : m.trigger);
+        if (m.beforeTokens != null && m.afterTokens != null) {
+          details.push(fmtK(m.beforeTokens) + ' → ' + fmtK(m.afterTokens) + ' tokens');
+        } else if (m.beforeTokens != null) {
+          details.push('压缩前 ' + fmtK(m.beforeTokens) + ' tokens');
+        }
+        if (m.durationMs != null) details.push((m.durationMs / 1000).toFixed(1) + 's');
+        if (m.ts) details.push(fmtTime(m.ts));
+        const box = el('div', 'msg compaction');
+        box.appendChild(el('span', 'compaction-label', '上下文已压缩' + (details.length ? ' · ' + details.join(' · ') : '')));
+        main.appendChild(box);
+        i++;
         continue;
       }
       const box = el('div', 'msg ' + m.role);

@@ -6,6 +6,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 
 const PORT = parseInt(process.env.PORT || '3789', 10);
@@ -22,6 +23,7 @@ const REMOTE_CACHE_MS = parseInt(process.env.WATCHCAT_REMOTE_CACHE_MS || '5000',
 const REMOTE_MAX_FILES = parseInt(process.env.WATCHCAT_REMOTE_MAX_FILES || '10', 10);
 const REMOTE_READ_CONCURRENCY = parseInt(process.env.WATCHCAT_REMOTE_READ_CONCURRENCY || '4', 10);
 const REMOTE_MAX_BUFFER = parseInt(process.env.WATCHCAT_REMOTE_MAX_BUFFER || String(128 * 1024 * 1024), 10);
+const REMOTE_HISTORY_DIR = path.resolve(process.env.WATCHCAT_REMOTE_HISTORY_DIR || path.join(HOME, '.watchcat', 'remote'));
 const SSH_ARGS = [
   '-o', 'BatchMode=yes',
   '-o', 'ConnectTimeout=5',
@@ -653,7 +655,85 @@ function remoteFileId(kind, host, file) {
 
 const remoteSummaryCache = new Map(); // host\0path -> { mtimeMs, size, content, summary }
 const remoteFileIndex = new Map(); // opaque id -> cache entry
+const remoteProjectPathCache = new Map(); // host\0cwd -> canonical cwd
 let remoteSessionsCache = { at: 0, sessions: [], hosts: [], errors: [] };
+
+function remoteCacheKey(kind, host, file) {
+  return kind + '\0' + host + '\0' + file;
+}
+
+function summarizeRemoteCacheEntry(entry) {
+  const id = remoteFileId(entry.kind, entry.host, entry.path);
+  return entry.kind === 'claude'
+    ? summarizeClaude(id, { size: entry.size }, entry.content)
+    : summarizeCodex(id, { size: entry.size }, entry.content);
+}
+
+function remoteHistoryFile(entry) {
+  const digest = crypto.createHash('sha256')
+    .update(remoteCacheKey(entry.kind, entry.host, entry.path)).digest('hex');
+  return path.join(REMOTE_HISTORY_DIR, digest + '.json');
+}
+
+function persistRemoteHistory(entry) {
+  try {
+    fs.mkdirSync(REMOTE_HISTORY_DIR, { recursive: true, mode: 0o700 });
+    const file = remoteHistoryFile(entry);
+    const temp = file + '.' + process.pid + '.tmp';
+    const record = {
+      version: 1,
+      kind: entry.kind, host: entry.host, path: entry.path, root: entry.root,
+      mtimeMs: entry.mtimeMs, size: entry.size, canonicalProject: entry.canonicalProject,
+      content: entry.content,
+    };
+    fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
+    fs.renameSync(temp, file);
+  } catch (error) {
+    console.error('无法保存远端会话缓存:', error.message);
+  }
+}
+
+function loadRemoteHistory() {
+  for (const item of safeReadDir(REMOTE_HISTORY_DIR)) {
+    if (!item.isFile() || !item.name.endsWith('.json')) continue;
+    try {
+      const entry = JSON.parse(fs.readFileSync(path.join(REMOTE_HISTORY_DIR, item.name), 'utf8'));
+      if (!['claude', 'codex'].includes(entry.kind) || typeof entry.host !== 'string' ||
+          typeof entry.path !== 'string' || typeof entry.content !== 'string') continue;
+      entry.size = Number(entry.size) || Buffer.byteLength(entry.content);
+      entry.mtimeMs = Number(entry.mtimeMs) || 0;
+      entry.summary = summarizeRemoteCacheEntry(entry);
+      remoteSummaryCache.set(remoteCacheKey(entry.kind, entry.host, entry.path), entry);
+      if (entry.canonicalProject && entry.summary?.project) {
+        remoteProjectPathCache.set(entry.host + '\0' + entry.summary.project, entry.canonicalProject);
+      }
+    } catch { /* 单个损坏的缓存文件不影响其他历史会话 */ }
+  }
+}
+
+loadRemoteHistory();
+
+async function resolveRemoteProjectPaths(host, projects) {
+  const paths = [...new Set(projects.filter(project => project && project.startsWith('/')))];
+  const unresolved = paths.filter(project => !remoteProjectPathCache.has(host + '\0' + project));
+  if (unresolved.length) {
+    const script = `set -- ${unresolved.map(shellQuote).join(' ')}
+for project do
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -- "$project" 2>/dev/null || printf '%s\\n' "$project"
+  elif command -v readlink >/dev/null 2>&1; then
+    readlink -f -- "$project" 2>/dev/null || printf '%s\\n' "$project"
+  else
+    (cd "$project" 2>/dev/null && pwd -P) || printf '%s\\n' "$project"
+  fi
+done`;
+    const resolved = (await sshCommand(host, script)).replace(/\n$/, '').split('\n');
+    for (let i = 0; i < unresolved.length; i++) {
+      remoteProjectPathCache.set(host + '\0' + unresolved[i], resolved[i] || unresolved[i]);
+    }
+  }
+  return new Map(paths.map(project => [project, remoteProjectPathCache.get(host + '\0' + project) || project]));
+}
 
 async function readRemoteFile(host, file, offset, length) {
   if (length <= 0) return '';
@@ -681,9 +761,11 @@ async function mapLimit(items, limit, fn) {
 async function scanRemoteHost(host) {
   const scan = parseRemoteScan(await sshCommand(host, REMOTE_SCAN_SCRIPT));
   const entries = await mapLimit(scan.files, REMOTE_READ_CONCURRENCY, async (meta) => {
+    const key = remoteCacheKey(meta.kind, host, meta.path);
+    const previous = remoteSummaryCache.get(key);
     try {
-      const key = meta.kind + '\0' + host + '\0' + meta.path;
-      let cached = remoteSummaryCache.get(key);
+      let cached = previous;
+      let dirty = false;
       if (!cached || cached.mtimeMs !== meta.mtimeMs || cached.size !== meta.size) {
         const canAppend = cached && meta.size > cached.size;
         const offset = canAppend ? cached.size : 0;
@@ -698,19 +780,44 @@ async function scanRemoteHost(host) {
           mtimeMs: meta.mtimeMs, size: meta.size, content, summary,
         };
         remoteSummaryCache.set(key, cached);
+        dirty = true;
       }
-      return { meta, cached };
+      return { meta, cached, dirty };
     } catch (error) {
-      return { meta, error };
+      return { meta, cached: previous, error };
     }
   });
 
+  const currentKeys = new Set(scan.files.map(meta => remoteCacheKey(meta.kind, host, meta.path)));
+  for (const [key, cached] of remoteSummaryCache) {
+    if (cached.host !== host || currentKeys.has(key)) continue;
+    entries.push({
+      meta: { kind: cached.kind, path: cached.path, mtimeMs: cached.mtimeMs, size: cached.size },
+      cached,
+      historical: true,
+    });
+  }
+
+  // Codex 和 Claude 可能分别记录软链接路径与真实路径；统一 cwd，避免同一项目被拆组。
+  const projectPaths = await resolveRemoteProjectPaths(host, [
+    ...entries.map(entry => entry.cached?.summary?.project),
+    ...Object.values(scan.aliveProjects).flatMap(projects => [...projects]),
+  ]);
+  for (const entry of entries) {
+    if (!entry.cached?.summary) continue;
+    const canonicalProject = projectPaths.get(entry.cached.summary.project) || entry.cached.summary.project;
+    const canonicalChanged = entry.cached.canonicalProject !== canonicalProject;
+    entry.cached.canonicalProject = canonicalProject;
+    if (entry.dirty || canonicalChanged) persistRemoteHistory(entry.cached);
+  }
+
   // Claude 会在每次写入后关闭日志文件；用存活进程的 cwd 关联该项目最新会话。
   const latestAliveClaude = new Map();
-  const aliveClaudeProjects = scan.aliveProjects.claude || new Set();
-  for (const { meta, cached } of entries) {
+  const aliveClaudeProjects = new Set([...(scan.aliveProjects.claude || [])]
+    .map(project => projectPaths.get(project) || project));
+  for (const { meta, cached, historical } of entries) {
     if (!cached || meta.kind !== 'claude' || !cached.summary) continue;
-    const project = cached.summary.project;
+    const project = projectPaths.get(cached.summary.project) || cached.summary.project;
     if (!aliveClaudeProjects.has(project)) continue;
     const previous = latestAliveClaude.get(project);
     if (!previous || meta.mtimeMs > previous.mtimeMs) latestAliveClaude.set(project, { path: meta.path, mtimeMs: meta.mtimeMs });
@@ -723,13 +830,15 @@ async function scanRemoteHost(host) {
     const s = { ...cached.summary };
     s.remoteHost = host;
     s.remotePath = meta.path;
-    s.project = host + ':' + s.project;
+    const canonicalProject = cached.canonicalProject || projectPaths.get(s.project) || s.project;
+    s.project = host + ':' + canonicalProject;
     s.version = [s.version, 'SSH ' + host].filter(Boolean).join(' · ');
     const now = Date.now();
     const ageMs = s.lastTs ? now - Date.parse(s.lastTs) : Infinity;
     const mtimeAge = now - meta.mtimeMs;
-    const aliveClaude = meta.kind === 'claude' && latestAliveClaude.get(cached.summary.project)?.path === meta.path;
-    if (mtimeAge < 60 * 1000) s.status = 'running';
+    const aliveClaude = meta.kind === 'claude' && latestAliveClaude.get(canonicalProject)?.path === meta.path;
+    if (historical) s.status = 'idle';
+    else if (mtimeAge < 60 * 1000) s.status = 'running';
     else if (scan.openFiles.has(meta.path)) s.status = ageMs < 2 * 60 * 1000 ? 'running' : 'open';
     else if (aliveClaude) s.status = 'open';
     else s.status = 'idle';
@@ -739,15 +848,39 @@ async function scanRemoteHost(host) {
   return { host, sessions };
 }
 
+function cachedRemoteHostSessions(host) {
+  const sessions = [];
+  for (const cached of remoteSummaryCache.values()) {
+    if (cached.host !== host || !cached.summary) continue;
+    const s = { ...cached.summary };
+    s.remoteHost = host;
+    s.remotePath = cached.path;
+    s.project = host + ':' + (cached.canonicalProject || s.project);
+    s.version = [s.version, 'SSH ' + host, '本地缓存'].filter(Boolean).join(' · ');
+    s.status = 'idle';
+    sessions.push(s);
+    remoteFileIndex.set(s.file, cached);
+  }
+  return sessions;
+}
+
 async function remoteAgentSessions() {
   if (Date.now() - remoteSessionsCache.at < REMOTE_CACHE_MS) return remoteSessionsCache;
-  const hosts = await discoverRemoteHosts();
-  const results = await Promise.allSettled(hosts.map(scanRemoteHost));
+  const activeHosts = await discoverRemoteHosts();
+  const cachedHosts = new Set([...remoteSummaryCache.values()].map(entry => entry.host));
+  const hosts = [...new Set([...activeHosts, ...cachedHosts])];
+  const results = await Promise.allSettled(activeHosts.map(scanRemoteHost));
   const sessions = [], errors = [];
-  for (let i = 0; i < results.length; i++) {
+  for (let i = 0; i < activeHosts.length; i++) {
     const result = results[i];
     if (result.status === 'fulfilled') sessions.push(...result.value.sessions);
-    else errors.push({ host: hosts[i], error: result.reason && result.reason.message || 'SSH failed' });
+    else {
+      sessions.push(...cachedRemoteHostSessions(activeHosts[i]));
+      errors.push({ host: activeHosts[i], error: result.reason && result.reason.message || 'SSH failed' });
+    }
+  }
+  for (const host of cachedHosts) {
+    if (!activeHosts.includes(host)) sessions.push(...cachedRemoteHostSessions(host));
   }
   remoteSessionsCache = { at: Date.now(), sessions, hosts, errors };
   return remoteSessionsCache;
@@ -997,6 +1130,17 @@ function detailClaude(file, content) {
   const msgs = [];
   for (const l of lines) {
     if (l.isSidechain && !isSubagent) continue;
+    if (l.type === 'system' && l.subtype === 'compact_boundary') {
+      const metadata = l.compactMetadata || {};
+      msgs.push({
+        role: 'compaction', ts: l.timestamp,
+        trigger: metadata.trigger || null,
+        beforeTokens: metadata.preTokens ?? null,
+        afterTokens: metadata.postTokens ?? null,
+        durationMs: metadata.durationMs ?? null,
+      });
+      continue;
+    }
     if (!isSubagent && l.type === 'user' && l.toolUseResult && l.toolUseResult.agentId &&
         (l.toolUseResult.isAsync || l.toolUseResult.status === 'async_launched')) {
       msgs.push({
@@ -1049,7 +1193,17 @@ function detailCodex(file, content) {
   const msgs = [];
   for (const l of lines) {
     const p = l.payload || {};
-    if (l.type === 'event_msg') {
+    if (l.type === 'compacted' || l.type === 'compaction' ||
+        (l.type === 'event_msg' && (p.type === 'compacted' || p.type === 'compaction'))) {
+      const details = p.info || p;
+      msgs.push({
+        role: 'compaction', ts: l.timestamp,
+        trigger: details.trigger || null,
+        beforeTokens: details.pre_tokens ?? details.preTokens ?? details.tokens_before ?? null,
+        afterTokens: details.post_tokens ?? details.postTokens ?? details.tokens_after ?? null,
+        durationMs: details.duration_ms ?? details.durationMs ?? null,
+      });
+    } else if (l.type === 'event_msg') {
       if (p.type === 'user_message' && p.message) msgs.push({ role: 'user', text: p.message, ts: l.timestamp });
       else if (p.type === 'agent_message' && p.message) msgs.push({ role: 'assistant', text: p.message, ts: l.timestamp });
       else if (p.type === 'agent_reasoning' && p.text) msgs.push({ role: 'thinking', text: truncate(p.text, 600), ts: l.timestamp });
@@ -1072,6 +1226,16 @@ function detailOpenClaw(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
   for (const l of lines) {
+    if (l.type === 'compaction') {
+      msgs.push({
+        role: 'compaction', ts: l.timestamp,
+        trigger: l.fromHook ? 'auto' : null,
+        beforeTokens: l.tokensBefore ?? null,
+        afterTokens: l.tokensAfter ?? null,
+        durationMs: l.durationMs ?? null,
+      });
+      continue;
+    }
     if (l.type !== 'message' || !l.message) continue;
     const m = l.message;
     const ts = l.timestamp || (m.timestamp ? new Date(m.timestamp).toISOString() : null);
@@ -1343,6 +1507,7 @@ module.exports = {
   apiSessions,
   apiSessionDetail,
   detailClaude,
+  detailCodex,
   detailOpenClaw,
   discoverRemoteHosts,
   normalizeModelName,
