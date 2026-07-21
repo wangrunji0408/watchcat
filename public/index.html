@@ -127,6 +127,59 @@
   .msg.compaction::before, .msg.compaction::after { content: ''; height: 1px; background: var(--border); flex: 1; }
   .compaction-label { white-space: nowrap; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; }
   .empty { color: var(--dim); text-align: center; margin-top: 15vh; }
+  .stats-btn { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 4px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  .stats-btn:hover { border-color: var(--accent); }
+  .stats-btn.active { border-color: var(--accent); color: var(--accent); }
+
+  /* ---------- 统计页 ---------- */
+  .stats-page { max-width: 1080px; margin: 0 auto; }
+  .stats-filter { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .stats-filter .range-btn { background: transparent; color: var(--dim); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px 12px; font-size: 12.5px; cursor: pointer; }
+  .stats-filter .range-btn:hover { color: var(--text); }
+  .stats-filter .range-btn.active { color: var(--text); border-color: var(--accent); background: rgba(122,162,247,.12); }
+  .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .kpi-label { color: var(--dim); font-size: 12px; }
+  .kpi-value { font-size: 24px; font-weight: 600; margin-top: 2px; }
+  .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px 12px; margin-bottom: 16px; }
+  .chart-title { font-weight: 600; margin-bottom: 2px; }
+  .chart-sub { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+  .chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--dim); margin-top: 8px; }
+  .chart-legend .key { display: inline-flex; align-items: center; gap: 5px; }
+  .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .chart-svg { display: block; width: 100%; }
+  .chart-svg text { font: 11px -apple-system, "PingFang SC", sans-serif; fill: var(--dim); }
+  .chart-svg .tick-label { font-variant-numeric: tabular-nums; }
+  .chart-svg .grid { stroke: #232838; stroke-width: 1; }
+  .chart-svg .axis { stroke: var(--border); stroke-width: 1; }
+  .bar-seg { shape-rendering: crispEdges; }
+  .bar-hit { fill: transparent; cursor: pointer; }
+  .bar-hit:hover { fill: rgba(255,255,255,.05); }
+  .viz-tooltip { position: fixed; z-index: 50; pointer-events: none; background: #0c0e14; border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 11px; font-size: 12px; max-width: 320px; box-shadow: 0 4px 16px rgba(0,0,0,.5); }
+  .viz-tooltip .tt-title { color: var(--dim); margin-bottom: 4px; }
+  .viz-tooltip .tt-row { display: flex; align-items: center; gap: 6px; line-height: 1.7; }
+  .viz-tooltip .tt-key { width: 10px; height: 3px; border-radius: 2px; flex-shrink: 0; }
+  .viz-tooltip .tt-val { font-weight: 600; margin-left: auto; padding-left: 14px; font-variant-numeric: tabular-nums; }
+  .viz-tooltip .tt-name { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+  /* 热力图 */
+  .heatmap-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .heatmap-cell { rx: 2px; cursor: pointer; }
+  .heatmap-cell:hover { stroke: var(--text); stroke-width: 1; }
+  .heatmap-scale { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--dim); margin-top: 6px; }
+  .heatmap-scale .cell { width: 10px; height: 10px; border-radius: 2px; }
+  /* 项目条形图 */
+  .hbar-row { display: grid; grid-template-columns: minmax(120px, 260px) 1fr 70px; gap: 10px; align-items: center;
+    padding: 4px 0; font-size: 12.5px; }
+  /* 长路径保尾部:内容右对齐,左侧溢出用渐隐遮罩截断 */
+  .hbar-name { color: var(--text); white-space: nowrap; overflow: hidden; display: flex; justify-content: flex-end;
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 24px); mask-image: linear-gradient(90deg, transparent, #000 24px); }
+  .hbar-track { height: 16px; position: relative; }
+  .hbar-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 0 4px 4px 0; min-width: 2px; }
+  .hbar-val { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
   .legend { display: flex; gap: 12px; font-size: 12px; color: var(--dim); align-items: center; }
   .legend .dot { margin-top: 0; }
   .detail-head { position: sticky; top: -16px; background: var(--bg); padding: 8px 0; margin: -8px 0 12px;
@@ -152,6 +205,10 @@
     .detail-head { top: calc(-12px - env(safe-area-inset-top)); padding-top: calc(8px + env(safe-area-inset-top)); }
     .back-btn { display: block; }
     .session { padding: 12px; }
+    /* 窄屏下项目名独占一行,条形与金额移到第二行;改回头部对齐+尾部省略 */
+    .hbar-row { grid-template-columns: 1fr 70px; }
+    .hbar-name { grid-column: 1 / -1; display: block; text-overflow: ellipsis;
+      -webkit-mask-image: none; mask-image: none; }
   }
 </style>
 </head>
@@ -160,6 +217,7 @@
   <h1>🐈 Watchcat</h1>
   <span class="sub" id="stats"></span>
   <div class="spacer"></div>
+  <button class="stats-btn" id="statsToggle">📊 统计</button>
   <div class="legend">
     <span class="dot running"></span><span class="txt">运行中</span>
     <span class="dot open"></span><span class="txt">存活</span>
@@ -180,6 +238,10 @@ const state = {
   knownProjects: new Set(),
   expandedDetails: new Set(),
   data: null,
+  statsOpen: false,
+  statsRange: 30, // 天数;0 = 全部
+  statsData: null,
+  statsAt: 0,
 };
 
 // ---------- 各来源 logo (内嵌 SVG 近似图形) ----------
@@ -425,6 +487,471 @@ function renderActivity(messages, start, sessionFile) {
   return activity;
 }
 
+// ---------- 统计页 ----------
+// 分类色板(已用 dataviz 验证器在 #171a23 表面上校验,深色模式全部通过)
+const SERIES_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
+const OTHER_COLOR = '#565f89';
+// 蓝色顺序色阶(取自同一色板的文档化梯度,深色表面下由暗到亮)
+const HEAT_COLORS = ['#20263a', '#184f95', '#256abf', '#3987e5', '#86b6ef'];
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svgEl(tag, attrs) {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs || {}) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+let tipNode = null;
+function showTip(x, y, build) {
+  if (!tipNode) { tipNode = el('div', 'viz-tooltip'); document.body.appendChild(tipNode); }
+  tipNode.innerHTML = '';
+  build(tipNode);
+  tipNode.style.display = 'block';
+  const r = tipNode.getBoundingClientRect();
+  tipNode.style.left = Math.min(x + 14, window.innerWidth - r.width - 8) + 'px';
+  tipNode.style.top = Math.max(8, Math.min(y + 14, window.innerHeight - r.height - 8)) + 'px';
+}
+function hideTip() { if (tipNode) tipNode.style.display = 'none'; }
+function tipRow(tip, color, name, value) {
+  const row = el('div', 'tt-row');
+  if (color) {
+    const key = el('span', 'tt-key');
+    key.style.background = color;
+    row.appendChild(key);
+  }
+  row.appendChild(el('span', 'tt-name', name));
+  row.appendChild(el('span', 'tt-val', value));
+  tip.appendChild(row);
+}
+
+function dateFromKey(k) { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d); }
+function dateKeyLocal(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function statsCutoffKey() {
+  if (!state.statsRange) return null;
+  const d = new Date();
+  d.setDate(d.getDate() - (state.statsRange - 1));
+  return dateKeyLocal(d);
+}
+function shortDate(key) { const d = dateFromKey(key); return (d.getMonth() + 1) + '/' + d.getDate(); }
+function niceStep(max, ticks) {
+  const raw = max / ticks;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  for (const m of [1, 2, 5, 10]) if (m * pow >= raw) return m * pow;
+  return 10 * pow;
+}
+
+async function fetchStats() {
+  const res = await fetch('/api/stats');
+  state.statsData = await res.json();
+  state.statsAt = Date.now();
+}
+
+// 模型 → 颜色:按全量总成本排序固定分配,时间筛选不改变既有配色
+function modelColorMap(models) {
+  const map = new Map();
+  let slot = 0;
+  for (const m of models) {
+    if (m.usd > 0 && slot < SERIES_COLORS.length - 1) map.set(m.model, SERIES_COLORS[slot++]);
+    else map.set(m.model, OTHER_COLOR);
+  }
+  return map;
+}
+
+function displayModel(colorMap, model) {
+  return colorMap.get(model) === OTHER_COLOR ? '其他' : model;
+}
+
+function chartCard(page, title, sub) {
+  const card = el('div', 'chart-card');
+  card.appendChild(el('div', 'chart-title', title));
+  if (sub) card.appendChild(el('div', 'chart-sub', sub));
+  page.appendChild(card);
+  return card;
+}
+
+function legendFor(card, entries) {
+  const legend = el('div', 'chart-legend');
+  for (const [name, color] of entries) {
+    const key = el('span', 'key');
+    const sw = el('span', 'swatch');
+    sw.style.background = color;
+    key.appendChild(sw);
+    key.appendChild(document.createTextNode(name));
+    legend.appendChild(key);
+  }
+  card.appendChild(legend);
+}
+
+// 每日成本堆叠柱状图
+function drawDailyCost(card, daily, colorMap) {
+  const byDay = new Map();
+  for (const r of daily) {
+    const name = displayModel(colorMap, r.model);
+    if (!byDay.has(r.date)) byDay.set(r.date, new Map());
+    const m = byDay.get(r.date);
+    m.set(name, (m.get(name) || 0) + r.usd);
+  }
+  if (!byDay.size) { card.appendChild(el('div', 'chart-sub', '所选时间内没有成本数据')); return; }
+
+  // 连续日期轴(包含零成本的日子),从范围起点(或最早数据)到今天
+  const dates = [...byDay.keys()].sort();
+  const days = [];
+  for (let d = dateFromKey(dates[0]), end = new Date(); d <= end; d.setDate(d.getDate() + 1)) {
+    days.push(dateKeyLocal(d));
+  }
+  // series 固定顺序:颜色表顺序(全量总成本降序),"其他"最后;只保留范围内出现的
+  const present = new Set();
+  for (const m of byDay.values()) for (const [name, v] of m) if (v > 0) present.add(name);
+  const seriesNames = [];
+  for (const model of colorMap.keys()) {
+    const name = displayModel(colorMap, model);
+    if (present.has(name) && !seriesNames.includes(name)) seriesNames.push(name);
+  }
+
+  const width = Math.max(320, card.clientWidth - 4);
+  const m = { top: 12, right: 8, bottom: 22, left: 46 };
+  const plotW = width - m.left - m.right, plotH = 220;
+  const height = plotH + m.top + m.bottom;
+  const svg = svgEl('svg', { class: 'chart-svg', viewBox: `0 0 ${width} ${height}`, height });
+
+  const maxUsd = Math.max(...days.map(day =>
+    [...(byDay.get(day) || new Map()).values()].reduce((a, b) => a + b, 0)));
+  const step = niceStep(maxUsd, 4);
+  const yMax = Math.max(step, Math.ceil(maxUsd / step) * step);
+  const y = v => m.top + plotH - (v / yMax) * plotH;
+
+  for (let v = 0; v <= yMax + 1e-9; v += step) {
+    svg.appendChild(svgEl('line', { class: v === 0 ? 'axis' : 'grid', x1: m.left, x2: width - m.right, y1: y(v), y2: y(v) }));
+    const label = svgEl('text', { class: 'tick-label', x: m.left - 6, y: y(v) + 4, 'text-anchor': 'end' });
+    label.textContent = '$' + (step < 1 ? v.toFixed(1) : Math.round(v));
+    svg.appendChild(label);
+  }
+
+  const band = plotW / days.length;
+  const barW = Math.min(24, Math.max(2, band - 2));
+  const labelEvery = Math.ceil(days.length / Math.max(3, Math.floor(plotW / 60)));
+  days.forEach((day, i) => {
+    const x = m.left + i * band + (band - barW) / 2;
+    if (i % labelEvery === 0) {
+      const t = svgEl('text', { class: 'tick-label', x: m.left + i * band + band / 2, y: height - 6, 'text-anchor': 'middle' });
+      t.textContent = shortDate(day);
+      svg.appendChild(t);
+    }
+    const segs = byDay.get(day);
+    let acc = 0;
+    if (segs) {
+      for (const name of seriesNames) {
+        const v = segs.get(name) || 0;
+        if (v <= 0) continue;
+        const y1 = y(acc), y0 = y(acc + v);
+        // 段间留 1px 表面间隙
+        const h = Math.max(0.5, y1 - y0 - (acc > 0 ? 1 : 0));
+        svg.appendChild(svgEl('rect', {
+          class: 'bar-seg', x, y: y1 - h, width: barW, height: h,
+          fill: seriesColorByName(colorMap, name),
+        }));
+        acc += v;
+      }
+    }
+    // 整列热区:悬停显示当天各模型明细
+    const hit = svgEl('rect', { class: 'bar-hit', x: m.left + i * band, y: m.top, width: band, height: plotH });
+    const show = (e) => {
+      const total = acc;
+      showTip(e.clientX, e.clientY, tip => {
+        tip.appendChild(el('div', 'tt-title', day));
+        if (!segs || !total) { tipRow(tip, null, '无成本', '$0'); return; }
+        for (const name of seriesNames) {
+          const v = segs.get(name) || 0;
+          if (v > 0) tipRow(tip, seriesColorByName(colorMap, name), name, fmtUsd(v));
+        }
+        tipRow(tip, null, '合计', fmtUsd(total));
+      });
+    };
+    hit.addEventListener('pointermove', show);
+    hit.addEventListener('pointerleave', hideTip);
+    svg.appendChild(hit);
+  });
+
+  card.appendChild(svg);
+  const legendEntries = seriesNames.map(name => [name, seriesColorByName(colorMap, name)]);
+  legendFor(card, legendEntries);
+}
+
+function seriesColorByName(colorMap, name) {
+  if (name === '其他') return OTHER_COLOR;
+  for (const [model, color] of colorMap) if (model === name) return color;
+  return OTHER_COLOR;
+}
+
+// 模型成本占比饼图(≤6 片,长尾并入"其他")
+function drawModelPie(card, daily, colorMap) {
+  const totals = new Map();
+  for (const r of daily) {
+    const name = displayModel(colorMap, r.model);
+    totals.set(name, (totals.get(name) || 0) + r.usd);
+  }
+  const all = [...totals.entries()].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  if (!all.length) { card.appendChild(el('div', 'chart-sub', '所选时间内没有成本数据')); return; }
+  const top = all.slice(0, 5);
+  const tail = all.slice(5).reduce((a, [, v]) => a + v, 0);
+  const slices = tail > 0 ? [...top.filter(([n]) => n !== '其他'), ['其他', tail + (top.find(([n]) => n === '其他')?.[1] || 0)]] : top;
+  const total = slices.reduce((a, [, v]) => a + v, 0);
+
+  const size = 220, cx = size / 2, cy = size / 2, r1 = 100, r0 = 58;
+  const wrap = el('div');
+  wrap.style.display = 'flex';
+  wrap.style.flexWrap = 'wrap';
+  wrap.style.gap = '8px 24px';
+  wrap.style.alignItems = 'center';
+  const svg = svgEl('svg', { class: 'chart-svg', viewBox: `0 0 ${size} ${size}`, width: size, height: size });
+  svg.style.flex = '0 0 auto';
+
+  let angle = -Math.PI / 2;
+  for (const [name, v] of slices) {
+    const a0 = angle, a1 = angle + (v / total) * Math.PI * 2;
+    angle = a1;
+    const large = a1 - a0 > Math.PI ? 1 : 0;
+    const p = (r, a) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
+    const path = svgEl('path', {
+      d: `M ${p(r1, a0)} A ${r1} ${r1} 0 ${large} 1 ${p(r1, a1)} L ${p(r0, a1)} A ${r0} ${r0} 0 ${large} 0 ${p(r0, a0)} Z`,
+      fill: seriesColorByName(colorMap, name),
+      stroke: '#171a23', 'stroke-width': 2, 'stroke-linejoin': 'round',
+    });
+    const show = e => showTip(e.clientX, e.clientY, tip => {
+      tip.appendChild(el('div', 'tt-title', name));
+      tipRow(tip, seriesColorByName(colorMap, name), (v / total * 100).toFixed(1) + '%', fmtUsd(v));
+    });
+    path.addEventListener('pointermove', show);
+    path.addEventListener('pointerleave', hideTip);
+    svg.appendChild(path);
+  }
+  const center = svgEl('text', { x: cx, y: cy - 2, 'text-anchor': 'middle' });
+  center.textContent = fmtUsd(total);
+  center.style.font = '600 20px -apple-system, sans-serif';
+  center.setAttribute('fill', '#d8dce8');
+  svg.appendChild(center);
+  const centerSub = svgEl('text', { x: cx, y: cy + 18, 'text-anchor': 'middle' });
+  centerSub.textContent = '总成本';
+  svg.appendChild(centerSub);
+
+  const list = el('div');
+  list.style.flex = '1 1 220px';
+  for (const [name, v] of slices) {
+    const row = el('div', 'hbar-row');
+    row.style.gridTemplateColumns = '12px 1fr auto auto';
+    const sw = el('span', 'swatch');
+    sw.style.cssText = 'width:10px;height:10px;border-radius:2px;background:' + seriesColorByName(colorMap, name);
+    row.appendChild(sw);
+    const nameNode = el('span', null, name);
+    nameNode.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    row.appendChild(nameNode);
+    row.appendChild(el('span', 'hbar-val', (v / total * 100).toFixed(1) + '%'));
+    row.appendChild(el('span', 'hbar-val', fmtUsd(v)));
+    list.appendChild(row);
+  }
+  wrap.appendChild(svg);
+  wrap.appendChild(list);
+  card.appendChild(wrap);
+}
+
+// GitHub 风格活跃热力图(指标:每日消息轮次)
+function drawHeatmap(card, activity, cutoffKey) {
+  const byDay = new Map();
+  for (const a of activity) {
+    if (cutoffKey && a.date < cutoffKey) continue;
+    byDay.set(a.date, a);
+  }
+  const today = new Date();
+  // 起点:范围起点或最早数据,向前对齐到周一;最多展示 53 周
+  let start = cutoffKey ? dateFromKey(cutoffKey)
+    : (byDay.size ? dateFromKey([...byDay.keys()].sort()[0]) : new Date(today));
+  const maxStart = new Date(today);
+  maxStart.setDate(maxStart.getDate() - 52 * 7);
+  if (start < maxStart) start = maxStart;
+  start.setDate(start.getDate() - (start.getDay() + 6) % 7); // 对齐周一
+
+  const values = [...byDay.values()].map(a => a.turns).filter(v => v > 0).sort((a, b) => a - b);
+  const q = p => values.length ? values[Math.min(values.length - 1, Math.floor(values.length * p))] : 1;
+  const thresholds = [q(0.25), q(0.5), q(0.75)];
+  const level = v => v <= 0 ? 0 : v <= thresholds[0] ? 1 : v <= thresholds[1] ? 2 : v <= thresholds[2] ? 3 : 4;
+
+  const cell = 12, gap = 3, left = 24, top = 16;
+  const weeks = Math.ceil(((today - start) / 86400000 + 1) / 7);
+  const width = left + weeks * (cell + gap);
+  const height = top + 7 * (cell + gap) + 4;
+  const scroll = el('div', 'heatmap-scroll');
+  const svg = svgEl('svg', { class: 'chart-svg', viewBox: `0 0 ${width} ${height}`, width, height });
+  svg.style.maxWidth = 'none';
+
+  ['一', '三', '五'].forEach((txt, i) => {
+    const t = svgEl('text', { x: left - 6, y: top + (i * 2) * (cell + gap) + cell - 2, 'text-anchor': 'end' });
+    t.textContent = txt;
+    svg.appendChild(t);
+  });
+
+  let lastMonth = -1;
+  for (let w = 0; w < weeks; w++) {
+    for (let dow = 0; dow < 7; dow++) {
+      const d = new Date(start);
+      d.setDate(d.getDate() + w * 7 + dow);
+      if (d > today) break;
+      const key = dateKeyLocal(d);
+      if (dow === 0 && d.getMonth() !== lastMonth) {
+        lastMonth = d.getMonth();
+        const t = svgEl('text', { x: left + w * (cell + gap), y: 10 });
+        t.textContent = (lastMonth + 1) + '月';
+        svg.appendChild(t);
+      }
+      const a = byDay.get(key);
+      const rect = svgEl('rect', {
+        class: 'heatmap-cell', x: left + w * (cell + gap), y: top + dow * (cell + gap),
+        width: cell, height: cell, rx: 2, fill: HEAT_COLORS[level(a ? a.turns : 0)],
+      });
+      const show = e => showTip(e.clientX, e.clientY, tip => {
+        tip.appendChild(el('div', 'tt-title', key));
+        tipRow(tip, null, '消息轮次', String(a ? a.turns : 0));
+        if (a && a.sessions) tipRow(tip, null, '活跃会话', String(a.sessions));
+      });
+      rect.addEventListener('pointermove', show);
+      rect.addEventListener('pointerleave', hideTip);
+      svg.appendChild(rect);
+    }
+  }
+  scroll.appendChild(svg);
+  card.appendChild(scroll);
+
+  const scale = el('div', 'heatmap-scale');
+  scale.appendChild(el('span', null, '少'));
+  for (const c of HEAT_COLORS) {
+    const s = el('span', 'cell');
+    s.style.background = c;
+    scale.appendChild(s);
+  }
+  scale.appendChild(el('span', null, '多'));
+  card.appendChild(scale);
+  scroll.scrollLeft = scroll.scrollWidth;
+}
+
+// Top10 项目成本(水平条形图)
+function drawTopProjects(card, projectDaily) {
+  const totals = new Map();
+  for (const r of projectDaily) {
+    const cur = totals.get(r.project) || { name: r.name, usd: 0 };
+    cur.usd += r.usd;
+    totals.set(r.project, cur);
+  }
+  const rows = [...totals.values()].filter(p => p.usd > 0).sort((a, b) => b.usd - a.usd);
+  if (!rows.length) { card.appendChild(el('div', 'chart-sub', '所选时间内没有成本数据')); return; }
+  const top = rows.slice(0, 10);
+  const max = top[0].usd;
+  for (const p of top) {
+    const row = el('div', 'hbar-row');
+    const name = el('span', 'hbar-name', p.name);
+    name.title = p.name;
+    row.appendChild(name);
+    const track = el('div', 'hbar-track');
+    const fill = el('div', 'hbar-fill');
+    fill.style.width = Math.max(1, p.usd / max * 100) + '%';
+    track.appendChild(fill);
+    row.appendChild(track);
+    row.appendChild(el('span', 'hbar-val', fmtUsd(p.usd)));
+    card.appendChild(row);
+  }
+  if (rows.length > 10) {
+    const restUsd = rows.slice(10).reduce((a, p) => a + p.usd, 0);
+    card.appendChild(el('div', 'chart-sub', '其余 ' + (rows.length - 10) + ' 个项目合计 ' + fmtUsd(restUsd)));
+  }
+}
+
+function renderStats() {
+  const main = document.getElementById('main');
+  const d = state.statsData;
+  main.innerHTML = '';
+  if (!d) { main.appendChild(el('div', 'empty', '加载中…')); return; }
+  const page = el('div', 'stats-page');
+  main.appendChild(page);
+
+  // 顶栏:返回(移动端) + 时间范围
+  const filter = el('div', 'stats-filter');
+  const back = el('button', 'back-btn', '‹ 返回');
+  back.onclick = closeStats;
+  filter.appendChild(back);
+  for (const [label, days] of [['近 7 天', 7], ['近 30 天', 30], ['近 90 天', 90], ['全部', 0]]) {
+    const btn = el('button', 'range-btn' + (state.statsRange === days ? ' active' : ''), label);
+    btn.onclick = () => { state.statsRange = days; renderStats(); };
+    filter.appendChild(btn);
+  }
+  page.appendChild(filter);
+
+  const cutoffKey = statsCutoffKey();
+  const daily = d.daily.filter(r => !cutoffKey || r.date >= cutoffKey);
+  const projectDaily = d.projectDaily.filter(r => !cutoffKey || r.date >= cutoffKey);
+  const activity = d.activity.filter(r => !cutoffKey || r.date >= cutoffKey);
+  const colorMap = modelColorMap(d.models); // 基于全量排序,筛选不换色
+
+  // KPI
+  const totalUsd = daily.reduce((a, r) => a + r.usd, 0);
+  const activeDays = new Set(daily.filter(r => r.usd > 0).map(r => r.date)).size;
+  const totalTurns = activity.reduce((a, r) => a + r.turns, 0);
+  const kpis = [
+    ['总成本', fmtUsd(totalUsd)],
+    ['日均成本(活跃日)', activeDays ? fmtUsd(totalUsd / activeDays) : '$0.00'],
+    ['活跃天数', String(activity.length)],
+    ['消息轮次', totalTurns.toLocaleString()],
+  ];
+  const kpiRow = el('div', 'kpi-row');
+  for (const [label, value] of kpis) {
+    const kpi = el('div', 'kpi');
+    kpi.appendChild(el('div', 'kpi-label', label));
+    kpi.appendChild(el('div', 'kpi-value', value));
+    kpiRow.appendChild(kpi);
+  }
+  page.appendChild(kpiRow);
+
+  const unknownNote = d.unknownModels && d.unknownModels.length
+    ? '未收录单价(不计成本): ' + d.unknownModels.join(', ') : '';
+
+  const c1 = chartCard(page, '每日成本', '按 Standard API 单价估算,柱内按模型细分' + (unknownNote ? ' · ' + unknownNote : ''));
+  drawDailyCost(c1, daily, colorMap);
+
+  const c2 = chartCard(page, '模型成本占比', '所选时间范围内各模型累计成本');
+  drawModelPie(c2, daily, colorMap);
+
+  const c3 = chartCard(page, '活跃热力图', '每日用户与助手消息轮次(所有来源)');
+  drawHeatmap(c3, d.activity, cutoffKey);
+
+  const c4 = chartCard(page, '项目成本 Top 10', '按会话所属项目累计');
+  drawTopProjects(c4, projectDaily);
+}
+
+async function openStats() {
+  state.statsOpen = true;
+  state.activeFile = null;
+  state.activeSession = null;
+  state.detailStack = [];
+  document.getElementById('statsToggle').classList.add('active');
+  document.body.classList.add('detail-open');
+  if (state.data) renderSidebar(); // 直接经 #stats 进入时会话列表可能尚未加载
+  const main = document.getElementById('main');
+  if (!state.statsData) main.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    await fetchStats();
+  } catch (e) {
+    main.innerHTML = '<div class="empty">统计加载失败: ' + e.message + '</div>';
+    return;
+  }
+  if (state.statsOpen) renderStats();
+}
+
+function closeStats() {
+  state.statsOpen = false;
+  document.getElementById('statsToggle').classList.remove('active');
+  document.body.classList.remove('detail-open');
+  document.getElementById('main').innerHTML = '<div class="empty">选择左侧会话查看日志</div>';
+}
+
 async function refresh() {
   try {
     const res = await fetch('/api/sessions');
@@ -566,6 +1093,7 @@ function closeDetail() {
 }
 
 function openRootSession(s) {
+  if (state.statsOpen) closeStats();
   state.detailStack = [];
   openSession(s);
 }
@@ -681,9 +1209,19 @@ function findActive() {
   return state.activeSession;
 }
 
+document.getElementById('statsToggle').onclick = () => state.statsOpen ? closeStats() : openStats();
+if (location.hash === '#stats') openStats();
+
 refresh();
 setInterval(async () => {
   await refresh();
+  if (state.statsOpen) {
+    // 统计数据 60s 静默刷新一次,保持当前渲染不闪烁
+    if (Date.now() - state.statsAt > 60000) {
+      try { await fetchStats(); if (state.statsOpen) renderStats(); } catch {}
+    }
+    return;
+  }
   const s = findActive();
   if (s && s.status !== 'idle') openSession(s, true); // 运行中的会话跟随刷新
 }, 5000);

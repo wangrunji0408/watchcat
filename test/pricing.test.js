@@ -65,6 +65,45 @@ test('deduplicates repeated Claude log entries by message id', () => {
   assert.equal(summary.cost.usd, 0.0017);
 });
 
+test('splits usage records into per-day per-model cost buckets', () => {
+  const { summarizeDailyRecords } = require('../server');
+  const usage = normalizedUsage({ input_tokens: 1_000_000, output_tokens: 0 }, 'claude');
+  const records = [
+    { model: 'claude-fable-5', usage, ts: '2026-07-20T18:00:00+08:00' },
+    { model: 'claude-fable-5', usage, ts: '2026-07-20T19:00:00+08:00' },
+    { model: 'gpt-5.5', usage, ts: '2026-07-21T08:00:00+08:00' },
+    { model: 'gpt-5.5', usage, ts: null }, // 无时间戳的记录不进入按天统计
+  ];
+  const daily = summarizeDailyRecords(records);
+
+  assert.equal(daily.length, 2);
+  assert.deepEqual(daily.map(d => d.model), ['claude-fable-5', 'gpt-5.5']);
+  assert.equal(daily[0].usd, 20); // 2M input @ $10/M
+  assert.equal(daily[0].requests, 2);
+  assert.ok(daily[0].date <= daily[1].date);
+});
+
+test('claude summaries expose daily cost and activity buckets', () => {
+  const mkAssistant = (id, ts) => ({
+    type: 'assistant', timestamp: ts,
+    message: {
+      id, model: 'claude-fable-5', content: [{ type: 'text', text: 'hi' }],
+      usage: { input_tokens: 100, output_tokens: 10 },
+    },
+  });
+  const rows = [
+    { type: 'user', message: { content: 'hello' }, timestamp: '2026-07-19T23:00:00Z' },
+    mkAssistant('m1', '2026-07-19T23:00:10Z'),
+    mkAssistant('m2', '2026-07-20T01:00:00Z'),
+  ];
+  const summary = summarizeClaude('/tmp/session.jsonl', { size: 1 },
+    rows.map(JSON.stringify).join('\n'));
+
+  assert.equal(summary.daily.reduce((a, d) => a + d.requests, 0), 2);
+  assert.ok(summary.daily.every(d => d.model === 'claude-fable-5'));
+  assert.equal(summary.activity.reduce((a, d) => a + d.turns, 0), 3);
+});
+
 test('marks models without an official catalog price as unknown', () => {
   const usage = normalizedUsage({ input_tokens: 1_000, output_tokens: 100 }, 'claude');
   const result = summarizeUsageRecords([{ model: 'unknown-model-v1', usage }]);

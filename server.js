@@ -204,6 +204,47 @@ function summarizeUsageRecords(records) {
   };
 }
 
+function localDateKey(ts) {
+  const d = new Date(ts);
+  if (isNaN(d)) return null;
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+// 把带时间戳的用量记录聚合为「日期 × 模型」的成本明细，供统计页使用。
+function summarizeDailyRecords(records) {
+  const groups = new Map();
+  for (const r of records) {
+    const date = r.ts && localDateKey(r.ts);
+    if (!date) continue;
+    const key = date + '\0' + (r.model || '');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const daily = [];
+  for (const [key, recs] of groups) {
+    const [date, model] = key.split('\0');
+    const { usage, cost } = summarizeUsageRecords(recs);
+    daily.push({
+      date,
+      model: model || null,
+      usd: cost ? cost.usd : null,
+      totalTokens: usage ? usage.totalTokens : 0,
+      requests: usage ? usage.requests : 0,
+    });
+  }
+  return daily.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function bumpDate(map, ts) {
+  const date = ts && localDateKey(ts);
+  if (date) map.set(date, (map.get(date) || 0) + 1);
+}
+
+function activityFromMap(map) {
+  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, turns]) => ({ date, turns }));
+}
+
 // ---------- 运行状态检测 (lsof) ----------
 
 let openFilesCache = { at: 0, files: new Set() };
@@ -285,6 +326,7 @@ function summarizeClaude(file, stat, content) {
   let contextTokens = null;
   const models = new Set();
   const usageByMessage = new Map();
+  const activityByDay = new Map();
 
   for (const l of lines) {
     if (l.timestamp) { if (!firstTs) firstTs = l.timestamp; lastTs = l.timestamp; }
@@ -302,6 +344,7 @@ function summarizeClaude(file, stat, content) {
       if (text && !isNoiseUserText(text) && !parseClaudeTaskNotification(text)) {
         userCount++;
         if (!firstUserText) firstUserText = text;
+        bumpDate(activityByDay, l.timestamp);
       }
     }
     if (l.type === 'assistant' && l.message && (!l.isSidechain || isSubagent)) {
@@ -310,7 +353,7 @@ function summarizeClaude(file, stat, content) {
         models.add(model);
       }
       const text = extractText(l.message.content);
-      if (text) { assistantCount++; lastEventText = text; }
+      if (text) { assistantCount++; lastEventText = text; bumpDate(activityByDay, l.timestamp); }
       const u = l.message.usage;
       if (u && u.input_tokens != null) {
         contextTokens = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) +
@@ -319,16 +362,20 @@ function summarizeClaude(file, stat, content) {
         usageByMessage.set(messageKey || `line:${usageByMessage.size}`, {
           model: l.message.model && l.message.model !== '<synthetic>' ? l.message.model : model,
           usage: normalizedUsage(u, 'claude'),
+          ts: l.timestamp || null,
         });
       }
     }
   }
   if (!firstUserText && !assistantCount) return null; // 空会话不展示
 
-  const totals = summarizeUsageRecords([...usageByMessage.values()]);
+  const usageRecords = [...usageByMessage.values()];
+  const totals = summarizeUsageRecords(usageRecords);
 
   return {
     source: 'claude',
+    daily: summarizeDailyRecords(usageRecords),
+    activity: activityFromMap(activityByDay),
     id: isSubagent ? agentId : sessionId,
     file,
     project: cwd || decodeClaudeDirName(path.basename(isSubagent
@@ -437,6 +484,7 @@ function summarizeCodex(file, stat, content) {
   let userCount = 0, agentCount = 0, contextTokens = null;
   const models = new Set();
   const usageRecords = [];
+  const activityByDay = new Map();
 
   for (const l of lines) {
     if (l.timestamp) { if (!firstTs) firstTs = l.timestamp; lastTs = l.timestamp; }
@@ -451,12 +499,17 @@ function summarizeCodex(file, stat, content) {
       if (p.type === 'user_message' && p.message) {
         userCount++;
         if (!firstUserText) firstUserText = p.message;
+        bumpDate(activityByDay, l.timestamp);
       }
-      if (p.type === 'agent_message' && p.message) { agentCount++; lastAgentText = p.message; }
+      if (p.type === 'agent_message' && p.message) {
+        agentCount++;
+        lastAgentText = p.message;
+        bumpDate(activityByDay, l.timestamp);
+      }
       if (p.type === 'token_count' && p.info && p.info.last_token_usage) {
         const u = p.info.last_token_usage;
         contextTokens = u.total_tokens || contextTokens;
-        usageRecords.push({ model, usage: normalizedUsage(u, 'codex') });
+        usageRecords.push({ model, usage: normalizedUsage(u, 'codex'), ts: l.timestamp || null });
       }
     }
   }
@@ -465,6 +518,8 @@ function summarizeCodex(file, stat, content) {
 
   return {
     source: 'codex',
+    daily: summarizeDailyRecords(usageRecords),
+    activity: activityFromMap(activityByDay),
     id: sessionId,
     file,
     project: cwd || '(未知项目)',
@@ -491,6 +546,7 @@ function summarizeOpenClaw(file, stat, content) {
   let userCount = 0, agentCount = 0, contextTokens = null;
   const models = new Set();
   const usageRecords = [];
+  const activityByDay = new Map();
 
   for (const l of lines) {
     if (l.timestamp) { if (!firstTs) firstTs = l.timestamp; lastTs = l.timestamp; }
@@ -504,17 +560,19 @@ function summarizeOpenClaw(file, stat, content) {
     }
     if (l.type !== 'message' || !l.message) continue;
     const m = l.message;
+    const ts = l.timestamp || (m.timestamp ? new Date(m.timestamp).toISOString() : null);
     const text = extractText(m.content);
     if (m.role === 'user' && text && !isNoiseUserText(text)) {
       userCount++;
       if (!firstUserText) firstUserText = text;
+      bumpDate(activityByDay, ts);
     } else if (m.role === 'assistant') {
       provider = m.provider || provider;
       if (m.model && m.model !== '<synthetic>') {
         model = m.model;
         models.add(model);
       }
-      if (text) { agentCount++; lastAgentText = text; }
+      if (text) { agentCount++; lastAgentText = text; bumpDate(activityByDay, ts); }
       else if (Array.isArray(m.content) && m.content.length) agentCount++;
       if (m.usage) {
         contextTokens = Number(m.usage.totalTokens ?? m.usage.total_tokens) || contextTokens;
@@ -527,6 +585,7 @@ function summarizeOpenClaw(file, stat, content) {
             cache_write_tokens: m.usage.cacheWrite ?? m.usage.cache_write_tokens,
             reasoning_tokens: m.usage.reasoning ?? m.usage.reasoning_tokens,
           }, 'openclaw'),
+          ts,
         });
       }
     }
@@ -538,6 +597,8 @@ function summarizeOpenClaw(file, stat, content) {
 
   return {
     source: 'openclaw',
+    daily: summarizeDailyRecords(usageRecords),
+    activity: activityFromMap(activityByDay),
     id: sessionId,
     file,
     project: cwd || (agentId ? `openclaw://${agentId}` : 'openclaw://unknown'),
@@ -824,7 +885,7 @@ async function scanRemoteHost(host) {
   }
 
   const sessions = [];
-  for (const { meta, cached } of entries) {
+  for (const { meta, cached, historical } of entries) {
     if (!cached) continue; // 单个历史日志读取失败不影响同一主机上的其他会话
     if (!cached.summary) continue;
     const s = { ...cached.summary };
@@ -1039,6 +1100,18 @@ function hermesSessions() {
     if (!usageBySession.has(u.session_id)) usageBySession.set(u.session_id, []);
     usageBySession.get(u.session_id).push(u);
   }
+  const activityBySession = new Map();
+  try {
+    const activityRows = db.prepare(`
+      SELECT session_id, date(timestamp, 'unixepoch', 'localtime') AS day, COUNT(*) AS turns
+      FROM messages WHERE role IN ('user', 'assistant') GROUP BY session_id, day
+    `).all();
+    for (const row of activityRows) {
+      if (!row.day) continue;
+      if (!activityBySession.has(row.session_id)) activityBySession.set(row.session_id, []);
+      activityBySession.get(row.session_id).push({ date: row.day, turns: Number(row.turns) || 0 });
+    }
+  } catch { /* 旧库缺 messages 表时跳过活跃度统计 */ }
   const alive = hermesGatewayAlive();
   const now = Date.now();
   const sessions = [];
@@ -1056,12 +1129,16 @@ function hermesSessions() {
         reasoning_tokens: u.reasoning_tokens,
         requests: u.api_call_count,
       }, 'hermes'),
+      // 用量表只有累计值,按最后活跃日归档(hermes 会话通常单日完成)
+      ts: u.last_seen ? new Date(Number(u.last_seen) * 1000).toISOString() : null,
     }));
     const totals = summarizeUsageRecords(usageRecords);
     const lastSec = r.last_msg_ts || r.ended_at || r.started_at;
     const lastTs = lastSec ? new Date(lastSec * 1000).toISOString() : null;
     const s = {
       source: 'hermes',
+      daily: summarizeDailyRecords(usageRecords),
+      activity: activityBySession.get(r.id) || [],
       id: r.id,
       file: 'hermes:' + r.id,
       project: r.cwd || 'hermes://' + (r.source || 'unknown'),
@@ -1340,7 +1417,7 @@ function attachSubagentEvents(messages, parentFile) {
 
 // ---------- API ----------
 
-async function apiSessions() {
+async function collectSessions() {
   const claudeFiles = listClaudeSessionFiles();
   const codexFiles = listFilesRecursive(CODEX_DIR, '.jsonl');
   const openClawEntries = listOpenClawSessionEntries();
@@ -1376,6 +1453,11 @@ async function apiSessions() {
   }
 
   sessions.push(...hermesSessions()); // hermes 的状态在读取时已确定
+  return { sessions, remote };
+}
+
+async function apiSessions() {
+  const { sessions, remote } = await collectSessions();
 
   const nextSubagentIndex = new Map();
   for (const s of sessions) {
@@ -1418,6 +1500,68 @@ async function apiSessions() {
     generatedAt: new Date().toISOString(),
     remoteHosts: remote.hosts,
     remoteErrors: remote.errors,
+  };
+}
+
+// 统计页聚合:按天 × 模型成本、模型总成本、每日活跃度、按天 × 项目成本。
+// 全部维度都按天输出,前端的时间范围筛选对四张图同时生效且数字一致。
+async function apiStats() {
+  const { sessions } = await collectSessions();
+
+  const dailyByModel = new Map(); // date\0modelName -> { usd, totalTokens, requests }
+  const byModel = new Map(); // modelName -> { usd, totalTokens, requests }
+  const activityByDay = new Map(); // date -> { turns, sessions }
+  const projectByDay = new Map(); // date\0project -> usd
+  const unknownModels = new Set();
+
+  for (const s of sessions) {
+    const project = s.project || '(未知项目)';
+    for (const d of s.daily || []) {
+      const price = d.model && priceForModel(d.model);
+      const name = price ? price.name : (d.model || '未知模型');
+      if (!price && d.model) unknownModels.add(d.model);
+      const usd = d.usd || 0;
+      const key = d.date + '\0' + name;
+      const day = dailyByModel.get(key) || { date: d.date, model: name, usd: 0, totalTokens: 0, requests: 0 };
+      day.usd += usd;
+      day.totalTokens += d.totalTokens || 0;
+      day.requests += d.requests || 0;
+      dailyByModel.set(key, day);
+      const m = byModel.get(name) || { model: name, usd: 0, totalTokens: 0, requests: 0, priced: !!price };
+      m.usd += usd;
+      m.totalTokens += d.totalTokens || 0;
+      m.requests += d.requests || 0;
+      byModel.set(name, m);
+      const pk = d.date + '\0' + project;
+      projectByDay.set(pk, (projectByDay.get(pk) || 0) + usd);
+    }
+    for (const a of s.activity || []) {
+      const day = activityByDay.get(a.date) || { date: a.date, turns: 0, sessions: 0 };
+      day.turns += a.turns || 0;
+      day.sessions += 1;
+      activityByDay.set(a.date, day);
+    }
+  }
+
+  const daily = [...dailyByModel.values()].sort((a, b) =>
+    a.date.localeCompare(b.date) || b.usd - a.usd);
+  const models = [...byModel.values()].sort((a, b) => b.usd - a.usd);
+  const activity = [...activityByDay.values()].sort((a, b) => a.date.localeCompare(b.date));
+  const projectDaily = [...projectByDay.entries()].map(([key, usd]) => {
+    const [date, project] = key.split('\0');
+    return {
+      date, project, usd,
+      name: project.startsWith(HOME) ? '~' + project.slice(HOME.length) : project,
+    };
+  }).sort((a, b) => a.date.localeCompare(b.date));
+
+  return {
+    daily,
+    models,
+    activity,
+    projectDaily,
+    unknownModels: [...unknownModels],
+    generatedAt: new Date().toISOString(),
   };
 }
 
@@ -1464,6 +1608,12 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(data));
       return;
     }
+    if (url.pathname === '/api/stats') {
+      const data = await apiStats();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(data));
+      return;
+    }
     if (url.pathname === '/api/session') {
       const data = apiSessionDetail(url.searchParams);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1506,6 +1656,8 @@ if (require.main === module) {
 module.exports = {
   apiSessions,
   apiSessionDetail,
+  apiStats,
+  summarizeDailyRecords,
   detailClaude,
   detailCodex,
   detailOpenClaw,
