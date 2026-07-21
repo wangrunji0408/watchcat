@@ -714,8 +714,9 @@ function remoteFileId(kind, host, file) {
   return 'remote-' + kind + ':' + Buffer.from(host + '\0' + file).toString('base64url');
 }
 
-const remoteSummaryCache = new Map(); // host\0path -> { mtimeMs, size, content, summary }
-const remoteFileIndex = new Map(); // opaque id -> cache entry
+// 与本地会话一样，远端正文只保存在磁盘上的 jsonl 中；内存仅缓存元数据和摘要。
+const remoteSummaryCache = new Map(); // host\0path -> { mtimeMs, size, cacheFile, summary }
+const remoteFileIndex = new Map(); // opaque id -> metadata entry
 const remoteProjectPathCache = new Map(); // host\0cwd -> canonical cwd
 let remoteSessionsCache = { at: 0, sessions: [], hosts: [], errors: [] };
 
@@ -725,27 +726,49 @@ function remoteCacheKey(kind, host, file) {
 
 function summarizeRemoteCacheEntry(entry) {
   const id = remoteFileId(entry.kind, entry.host, entry.path);
-  return entry.kind === 'claude'
-    ? summarizeClaude(id, { size: entry.size }, entry.content)
-    : summarizeCodex(id, { size: entry.size }, entry.content);
+  const summary = getSummary(entry.cacheFile, entry.kind);
+  return summary ? { ...summary, file: id, sizeBytes: entry.size } : null;
+}
+
+function remoteHistoryDigest(entry) {
+  return crypto.createHash('sha256')
+    .update(remoteCacheKey(entry.kind, entry.host, entry.path)).digest('hex');
 }
 
 function remoteHistoryFile(entry) {
-  const digest = crypto.createHash('sha256')
-    .update(remoteCacheKey(entry.kind, entry.host, entry.path)).digest('hex');
-  return path.join(REMOTE_HISTORY_DIR, digest + '.json');
+  return path.join(REMOTE_HISTORY_DIR, remoteHistoryDigest(entry) + '.json');
+}
+
+function remoteContentFile(entry) {
+  return path.join(REMOTE_HISTORY_DIR, remoteHistoryDigest(entry) + '.jsonl');
+}
+
+function ensureRemoteHistoryDir() {
+  fs.mkdirSync(REMOTE_HISTORY_DIR, { recursive: true, mode: 0o700 });
+}
+
+function writeRemoteContent(entry, content, append) {
+  ensureRemoteHistoryDir();
+  const file = remoteContentFile(entry);
+  if (append) {
+    fs.appendFileSync(file, content, { mode: 0o600 });
+  } else {
+    const temp = file + '.' + process.pid + '.tmp';
+    fs.writeFileSync(temp, content, { mode: 0o600 });
+    fs.renameSync(temp, file);
+  }
+  return file;
 }
 
 function persistRemoteHistory(entry) {
   try {
-    fs.mkdirSync(REMOTE_HISTORY_DIR, { recursive: true, mode: 0o700 });
+    ensureRemoteHistoryDir();
     const file = remoteHistoryFile(entry);
     const temp = file + '.' + process.pid + '.tmp';
     const record = {
-      version: 1,
+      version: 2,
       kind: entry.kind, host: entry.host, path: entry.path, root: entry.root,
       mtimeMs: entry.mtimeMs, size: entry.size, canonicalProject: entry.canonicalProject,
-      content: entry.content,
     };
     fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
     fs.renameSync(temp, file);
@@ -760,14 +783,24 @@ function loadRemoteHistory() {
     try {
       const entry = JSON.parse(fs.readFileSync(path.join(REMOTE_HISTORY_DIR, item.name), 'utf8'));
       if (!['claude', 'codex'].includes(entry.kind) || typeof entry.host !== 'string' ||
-          typeof entry.path !== 'string' || typeof entry.content !== 'string') continue;
-      entry.size = Number(entry.size) || Buffer.byteLength(entry.content);
+          typeof entry.path !== 'string') continue;
+      const legacyContent = typeof entry.content === 'string' ? entry.content : null;
+      entry.size = Number(entry.size) || (legacyContent == null ? 0 : Buffer.byteLength(legacyContent));
       entry.mtimeMs = Number(entry.mtimeMs) || 0;
+      entry.cacheFile = remoteContentFile(entry);
+      if (!fs.existsSync(entry.cacheFile)) {
+        if (legacyContent == null) continue;
+        writeRemoteContent(entry, legacyContent, false);
+      }
+      // 正文和元数据分两次原子写；若上次在两者之间退出，以正文实际大小恢复。
+      entry.size = fs.statSync(entry.cacheFile).size;
+      delete entry.content;
       entry.summary = summarizeRemoteCacheEntry(entry);
       remoteSummaryCache.set(remoteCacheKey(entry.kind, entry.host, entry.path), entry);
       if (entry.canonicalProject && entry.summary?.project) {
         remoteProjectPathCache.set(entry.host + '\0' + entry.summary.project, entry.canonicalProject);
       }
+      if (legacyContent != null || entry.version !== 2) persistRemoteHistory(entry);
     } catch { /* 单个损坏的缓存文件不影响其他历史会话 */ }
   }
 }
@@ -828,18 +861,20 @@ async function scanRemoteHost(host) {
       let cached = previous;
       let dirty = false;
       if (!cached || cached.mtimeMs !== meta.mtimeMs || cached.size !== meta.size) {
-        const canAppend = cached && meta.size > cached.size;
+        let cachedFileSize = -1;
+        try { cachedFileSize = fs.statSync(cached.cacheFile).size; } catch {}
+        const canAppend = cached && meta.size > cached.size && cachedFileSize === cached.size;
         const offset = canAppend ? cached.size : 0;
         const chunk = await readRemoteFile(host, meta.path, offset, meta.size - offset);
-        const content = canAppend ? cached.content + chunk : chunk;
-        const id = remoteFileId(meta.kind, host, meta.path);
-        const summary = meta.kind === 'claude'
-          ? summarizeClaude(id, { size: meta.size }, content)
-          : summarizeCodex(id, { size: meta.size }, content);
+        if (Buffer.byteLength(chunk) !== meta.size - offset) {
+          throw new Error(`remote session changed while reading: ${meta.path}`);
+        }
         cached = {
           kind: meta.kind, host, path: meta.path, root: scan.roots[meta.kind],
-          mtimeMs: meta.mtimeMs, size: meta.size, content, summary,
+          mtimeMs: meta.mtimeMs, size: meta.size,
         };
+        cached.cacheFile = writeRemoteContent(cached, chunk, canAppend);
+        cached.summary = summarizeRemoteCacheEntry(cached);
         remoteSummaryCache.set(key, cached);
         dirty = true;
       }
@@ -1576,9 +1611,10 @@ function apiSessionDetail(query) {
   if (file.startsWith('remote-codex:') || file.startsWith('remote-claude:')) {
     const remote = remoteFileIndex.get(file);
     if (!remote) throw httpError(404, 'remote session not found; refresh sessions first');
+    if (!fs.existsSync(remote.cacheFile)) throw httpError(404, 'remote session cache not found');
     const messages = remote.kind === 'claude'
-      ? detailClaude(file, remote.content)
-      : detailCodex(file, remote.content);
+      ? detailClaude(remote.cacheFile)
+      : detailCodex(remote.cacheFile);
     return { file, source: remote.kind, remoteHost: remote.host, messages };
   }
   const resolved = path.resolve(file);

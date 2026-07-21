@@ -31,7 +31,7 @@ npm start
 - **日志查看**：点击会话查看完整对话（用户、助手和思考内容使用 Markdown 渲染），思考过程与工具调用默认折叠展示，上下文压缩显示为独立时间线事件；subagent 不单独出现在项目列表中，其创建/完成事件嵌入主会话并可点击进入子会话记录；运行中的会话自动跟随最新输出滚动。
 - **模型与成本**：显示每个会话实际记录的模型名，并按 OpenAI / Anthropic Standard API 公开单价估算 token 成本（USD）；区分输入、缓存读写与输出 token，OpenAI 长上下文自动采用对应单价。没有可匹配官方价格的第三方模型显示“价格未知”。
 
-Remote SSH 使用本机现有 SSH 配置和密钥，以 `BatchMode` 只读访问远端。默认每轮读取每台主机最近的 10 个会话，并把已读取的历史日志持久保存在 `~/.watchcat/remote`；即使会话退出最近列表或 SSH 暂时不可用，仍可查看本地缓存。可通过 `WATCHCAT_REMOTE_MAX_FILES`、`WATCHCAT_REMOTE_READ_CONCURRENCY` 和 `WATCHCAT_REMOTE_HISTORY_DIR` 调整。
+Remote SSH 使用本机现有 SSH 配置和密钥，以 `BatchMode` 只读访问远端。默认每轮读取每台主机最近的 10 个会话，并把已读取的历史日志以 `.jsonl` 持久保存在 `~/.watchcat/remote`；与本机会话一样，日志正文按需从文件读取，不常驻内存。即使会话退出最近列表或 SSH 暂时不可用，仍可查看本地缓存。可通过 `WATCHCAT_REMOTE_MAX_FILES`、`WATCHCAT_REMOTE_READ_CONCURRENCY` 和 `WATCHCAT_REMOTE_HISTORY_DIR` 调整。
 
 ## 安全说明
 
