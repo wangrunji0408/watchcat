@@ -63,58 +63,62 @@ function truncate(s, n) {
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
 const MODEL_PRICES = [
-  { test: /^gpt-5\.6-sol(?:-|$)/, name: 'gpt-5.6-sol', input: 5, cached: .5, output: 30, long: [10, 1, 45] },
-  { test: /^gpt-5\.6-terra(?:-|$)/, name: 'gpt-5.6-terra', input: 2.5, cached: .25, output: 15, long: [5, .5, 22.5] },
-  { test: /^gpt-5\.6-luna(?:-|$)/, name: 'gpt-5.6-luna', input: 1, cached: .1, output: 6, long: [2, .2, 9] },
-  { test: /^gpt-5\.5-pro(?:-|$)/, name: 'gpt-5.5-pro', input: 30, output: 180, long: [60, null, 270] },
-  { test: /^gpt-5\.5(?:-|$)/, name: 'gpt-5.5', input: 5, cached: .5, output: 30, long: [10, 1, 45] },
-  { test: /^gpt-5\.4-mini(?:-|$)/, name: 'gpt-5.4-mini', input: .75, cached: .075, output: 4.5 },
-  { test: /^gpt-5\.4-nano(?:-|$)/, name: 'gpt-5.4-nano', input: .2, cached: .02, output: 1.25 },
-  { test: /^gpt-5\.4-pro(?:-|$)/, name: 'gpt-5.4-pro', input: 30, output: 180, long: [60, null, 270] },
-  { test: /^gpt-5\.4(?:-|$)/, name: 'gpt-5.4', input: 2.5, cached: .25, output: 15, long: [5, .5, 22.5] },
-  { test: /^gpt-5\.3-codex(?:-|$)/, name: 'gpt-5.3-codex', input: 1.75, cached: .175, output: 14 },
-  { test: /^claude-(?:fable|mythos)-5(?:-|$)/, name: 'Claude Fable/Mythos 5', input: 10, cacheWrite5m: 12.5, cacheWrite1h: 20, cached: 1, output: 50 },
-  { test: /^claude-opus-4[-.]([5-8])(?:-|$)/, name: 'Claude Opus 4.5+', input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cached: .5, output: 25 },
-  { test: /^claude-opus-4[-.]1(?:-|$)/, name: 'Claude Opus 4.1', input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cached: 1.5, output: 75 },
-  { test: /^claude-opus-4(?:-|$)/, name: 'Claude Opus 4', input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cached: 1.5, output: 75 },
-  { test: /^claude-sonnet-4[-.](?:5|6)(?:-|$)/, name: 'Claude Sonnet 4.5+', input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cached: .3, output: 15 },
-  { test: /^claude-sonnet-4(?:-|$)/, name: 'Claude Sonnet 4', input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cached: .3, output: 15 },
-  { test: /^claude-haiku-4[-.]5(?:-|$)/, name: 'Claude Haiku 4.5', input: 1, cacheWrite5m: 1.25, cacheWrite1h: 2, cached: .1, output: 5 },
-  { test: /^claude-(?:haiku-3[-.]5|3[-.]5-haiku)(?:-|$)/, name: 'Claude Haiku 3.5', input: .8, cacheWrite5m: 1, cacheWrite1h: 1.6, cached: .08, output: 4 },
+  { test: /gpt[-.]5[-.]6[-.]sol(?:\b|$)/, name: 'GPT 5.6 Sol', input: 5, cached: .5, output: 30, long: [10, 1, 45] },
+  { test: /gpt[-.]5[-.]6[-.]terra(?:\b|$)/, name: 'GPT 5.6 Terra', input: 2.5, cached: .25, output: 15, long: [5, .5, 22.5] },
+  { test: /gpt[-.]5[-.]6[-.]luna(?:\b|$)/, name: 'GPT 5.6 Luna', input: 1, cached: .1, output: 6, long: [2, .2, 9] },
+  { test: /gpt[-.]5[-.]5[-.]pro(?:\b|$)/, name: 'GPT 5.5 Pro', input: 30, output: 180, long: [60, null, 270] },
+  { test: /gpt[-.]5[-.]5(?:\b|$)/, name: 'GPT 5.5', input: 5, cached: .5, output: 30, long: [10, 1, 45] },
+  { test: /gpt[-.]5[-.]4[-.]mini(?:\b|$)/, name: 'GPT 5.4 Mini', input: .75, cached: .075, output: 4.5 },
+  { test: /gpt[-.]5[-.]4[-.]nano(?:\b|$)/, name: 'GPT 5.4 Nano', input: .2, cached: .02, output: 1.25 },
+  { test: /gpt[-.]5[-.]4[-.]pro(?:\b|$)/, name: 'GPT 5.4 Pro', input: 30, output: 180, long: [60, null, 270] },
+  { test: /gpt[-.]5[-.]4(?:\b|$)/, name: 'GPT 5.4', input: 2.5, cached: .25, output: 15, long: [5, .5, 22.5] },
+  { test: /gpt[-.]5[-.]3[-.]codex(?:\b|$)/, name: 'GPT 5.3 Codex', input: 1.75, cached: .175, output: 14 },
+  { test: /(?:fable|mythos)[-.]5(?:\b|$)/, name: 'Claude Fable/Mythos 5', input: 10, cacheWrite5m: 12.5, cacheWrite1h: 20, cached: 1, output: 50 },
+  { test: /opus[-.]4[-.]([5-8])(?:\b|$)/, name: 'Claude Opus 4.5+', input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cached: .5, output: 25 },
+  { test: /opus[-.]4[-.]1(?:\b|$)/, name: 'Claude Opus 4.1', input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cached: 1.5, output: 75 },
+  { test: /opus[-.]4(?:\b|$)/, name: 'Claude Opus 4', input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cached: 1.5, output: 75 },
+  { test: /sonnet[-.]4[-.](?:5|6)(?:\b|$)/, name: 'Claude Sonnet 4.5+', input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cached: .3, output: 15 },
+  { test: /sonnet[-.]4(?:\b|$)/, name: 'Claude Sonnet 4', input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cached: .3, output: 15 },
+  { test: /haiku[-.]4[-.]5(?:\b|$)/, name: 'Claude Haiku 4.5', input: 1, cacheWrite5m: 1.25, cacheWrite1h: 2, cached: .1, output: 5 },
+  { test: /(?:haiku[-.]3[-.]5|3[-.]5[-.]haiku)(?:\b|$)/, name: 'Claude Haiku 3.5', input: .8, cacheWrite5m: 1, cacheWrite1h: 1.6, cached: .08, output: 4 },
   // DeepSeek: https://api-docs.deepseek.com/quick_start/pricing/
-  { test: /^deepseek-v4-pro(?:-|$)/, name: 'DeepSeek V4 Pro', input: .435, cached: .003625, output: .87 },
-  { test: /^deepseek-v4-flash(?:-|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
-  { test: /^deepseek-(?:chat|reasoner)(?:-|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
+  { test: /deepseek[-.]v4[-.]pro(?:\b|$)/, name: 'DeepSeek V4 Pro', input: .435, cached: .003625, output: .87 },
+  { test: /deepseek[-.]v4[-.]flash(?:\b|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
+  { test: /deepseek[-.](?:chat|reasoner)(?:\b|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
   // Kimi: https://platform.kimi.com/docs/pricing
-  { test: /^kimi-k3(?:-|$)/, name: 'Kimi K3', input: 3, cached: .3, output: 15 },
-  { test: /^kimi-k2\.7-code-highspeed(?:-|$)/, name: 'Kimi K2.7 Code HighSpeed', input: 1.9, cached: .38, output: 8 },
-  { test: /^kimi-k2\.7-code(?:-|$)/, name: 'Kimi K2.7 Code', input: .95, cached: .19, output: 4 },
-  { test: /^kimi-k2\.7(?:-|$)/, name: 'Kimi K2.7', input: .95, cached: .19, output: 4 },
-  { test: /^kimi-k2\.6(?:-|$)/, name: 'Kimi K2.6', input: .95, cached: .16, output: 4 },
-  { test: /^kimi-k2\.5(?:-|$)/, name: 'Kimi K2.5', input: .6, cached: .1, output: 3 },
-  { test: /^kimi-k2-thinking-turbo(?:-|$)/, name: 'Kimi K2 Thinking Turbo', input: 1.15, cached: .15, output: 8 },
-  { test: /^kimi-k2-turbo-preview(?:-|$)/, name: 'Kimi K2 Turbo Preview', input: 1.15, cached: .15, output: 8 },
-  { test: /^kimi-k2-thinking(?:-|$)/, name: 'Kimi K2 Thinking', input: .6, cached: .15, output: 2.5 },
-  { test: /^kimi-k2-\d{4}-preview(?:-|$)/, name: 'Kimi K2 Preview', input: .6, cached: .15, output: 2.5 },
-  { test: /^kimi-k2(?:-|$)/, name: 'Kimi K2', input: .6, cached: .15, output: 2.5 },
+  { test: /kimi[-.]k3(?:\b|$)/, name: 'Kimi K3', input: 3, cached: .3, output: 15 },
+  { test: /kimi[-.]k2[-.]7[-.]code[-.]highspeed(?:\b|$)/, name: 'Kimi K2.7 Code HighSpeed', input: 1.9, cached: .38, output: 8 },
+  { test: /kimi[-.]k2[-.]7[-.]code(?:\b|$)/, name: 'Kimi K2.7 Code', input: .95, cached: .19, output: 4 },
+  { test: /kimi[-.]k2[-.]7(?:\b|$)/, name: 'Kimi K2.7', input: .95, cached: .19, output: 4 },
+  { test: /kimi[-.]k2[-.]6(?:\b|$)/, name: 'Kimi K2.6', input: .95, cached: .16, output: 4 },
+  { test: /kimi[-.]k2[-.]5(?:\b|$)/, name: 'Kimi K2.5', input: .6, cached: .1, output: 3 },
+  { test: /kimi[-.]k2[-.]thinking[-.]turbo(?:\b|$)/, name: 'Kimi K2 Thinking Turbo', input: 1.15, cached: .15, output: 8 },
+  { test: /kimi[-.]k2[-.]turbo[-.]preview(?:\b|$)/, name: 'Kimi K2 Turbo Preview', input: 1.15, cached: .15, output: 8 },
+  { test: /kimi[-.]k2[-.]thinking(?:\b|$)/, name: 'Kimi K2 Thinking', input: .6, cached: .15, output: 2.5 },
+  { test: /kimi[-.]k2[-.]\d{4}[-.]preview(?:\b|$)/, name: 'Kimi K2 Preview', input: .6, cached: .15, output: 2.5 },
+  { test: /kimi[-.]k2(?:\b|$)/, name: 'Kimi K2', input: .6, cached: .15, output: 2.5 },
   // Moonshot V1（无上下文缓存，预计 2026-08-31 下线）
-  { test: /^moonshot-v1-128k(?:-|$)/, name: 'Moonshot V1 128K', input: 2, output: 5 },
-  { test: /^moonshot-v1-32k(?:-|$)/, name: 'Moonshot V1 32K', input: 1, output: 3 },
-  { test: /^moonshot-v1-8k(?:-|$)/, name: 'Moonshot V1 8K', input: .2, output: 2 },
-  { test: /^moonshot-v1(?:-|$)/, name: 'Moonshot V1', input: 1, output: 3 },
+  { test: /moonshot[-.]v1[-.]128k(?:\b|$)/, name: 'Moonshot V1 128K', input: 2, output: 5 },
+  { test: /moonshot[-.]v1[-.]32k(?:\b|$)/, name: 'Moonshot V1 32K', input: 1, output: 3 },
+  { test: /moonshot[-.]v1[-.]8k(?:\b|$)/, name: 'Moonshot V1 8K', input: .2, output: 2 },
+  { test: /moonshot[-.]v1(?:\b|$)/, name: 'Moonshot V1', input: 1, output: 3 },
+  // GLM: https://z.ai/models/glm-5.2
+  { test: /glm[-.]5[-.]2(?:\b|$)/, name: 'GLM 5.2', input: 1.4, cached: .26, output: 4.4 },
 ];
 
 function normalizeModelName(model) {
   return String(model || '').trim().toLowerCase()
     .replace(/^(?:openai|anthropic|moonshot)\//, '')
     .replace(/^azure-/, '')
-    .replace(/-\d{4}-\d{2}-\d{2}$/, '');
+    .replace(/_/g, '-')
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/-\d{8}$/, '');
 }
 
 function priceForModel(model, usage = {}, now = new Date()) {
   const normalized = normalizeModelName(model);
   // Sonnet 5 的官方推广价截至 2026-08-31，之后自动切换标准价。
-  if (/^claude-sonnet-5(?:-|$)/.test(normalized)) {
+  if (/sonnet[-.]5(?:\b|$)/.test(normalized)) {
     const promotional = now < new Date('2026-09-01T00:00:00Z');
     return promotional
       ? { name: 'Claude Sonnet 5', input: 2, cacheWrite5m: 2.5, cacheWrite1h: 4, cached: .2, output: 10 }
@@ -125,12 +129,12 @@ function priceForModel(model, usage = {}, now = new Date()) {
   price = { ...price };
 
   // Claude Opus fast mode 和 US-only inference 使用官方对应倍率。
-  if (usage.speed === 'fast' && /^claude-opus-4[-.]8(?:-|$)/.test(normalized)) {
+  if (usage.speed === 'fast' && /opus[-.]4[-.]8(?:\b|$)/.test(normalized)) {
     Object.assign(price, { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cached: 1 });
-  } else if (usage.speed === 'fast' && /^claude-opus-4[-.]7(?:-|$)/.test(normalized)) {
+  } else if (usage.speed === 'fast' && /opus[-.]4[-.]7(?:\b|$)/.test(normalized)) {
     Object.assign(price, { input: 30, output: 150, cacheWrite5m: 37.5, cacheWrite1h: 60, cached: 3 });
   }
-  if (usage.inferenceGeo === 'us' && /^claude-(?:fable|mythos|opus-4[-.][6-8]|sonnet-(?:4[-.]6|5))/.test(normalized)) {
+  if (usage.inferenceGeo === 'us' && /(?:fable|mythos)[-.]5|opus[-.]4[-.][6-8]|sonnet[-.](?:4[-.]6|5)/.test(normalized)) {
     for (const key of ['input', 'cached', 'cacheWrite5m', 'cacheWrite1h', 'output']) {
       if (price[key] != null) price[key] *= 1.1;
     }
