@@ -1228,7 +1228,7 @@ function detailHermes(sessionId) {
             const fn = tc.function || tc;
             const input = truncate(String(fn.arguments || ''), 400);
             msgs.push({ role: 'tool_use', ts, toolName: fn.name || '?', callId: tc.id || null,
-              input, text: (fn.name || '?') + ' ' + input });
+              input, ...toolRenderData(fn.name, fn.arguments), text: (fn.name || '?') + ' ' + input });
           }
         } catch {}
       }
@@ -1240,6 +1240,57 @@ function detailHermes(sessionId) {
 }
 
 // ---------- 会话详情 ----------
+
+function extractEditCall(name, raw) {
+  if (shortToolName(name) !== 'edit') return null;
+  const args = parseToolArgs(raw);
+  if (!args) return null;
+  const oldText = args.old_string ?? args.oldText;
+  const newText = args.new_string ?? args.newText;
+  if (typeof oldText !== 'string' || typeof newText !== 'string') return null;
+  return {
+    path: String(args.file_path ?? args.path ?? ''),
+    oldText,
+    newText,
+    replaceAll: Boolean(args.replace_all ?? args.replaceAll),
+  };
+}
+
+function shortToolName(name) {
+  return String(name || '').split(/[.:/]/).pop().toLowerCase();
+}
+
+function parseToolArgs(raw) {
+  let args = raw;
+  if (typeof args === 'string') {
+    try { args = JSON.parse(args); } catch { return null; }
+  }
+  return args && typeof args === 'object' ? args : null;
+}
+
+function extractBashCall(name, raw) {
+  if (shortToolName(name) !== 'bash') return null;
+  const args = parseToolArgs(raw);
+  return args && typeof args.command === 'string' ? { command: args.command } : null;
+}
+
+function extractWriteCall(name, raw) {
+  if (shortToolName(name) !== 'write') return null;
+  const args = parseToolArgs(raw);
+  if (!args || typeof args.content !== 'string') return null;
+  return {
+    path: String(args.file_path ?? args.path ?? ''),
+    content: args.content,
+  };
+}
+
+function toolRenderData(name, raw) {
+  return {
+    edit: extractEditCall(name, raw),
+    bash: extractBashCall(name, raw),
+    write: extractWriteCall(name, raw),
+  };
+}
 
 function detailClaude(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
@@ -1296,6 +1347,7 @@ function detailClaude(file, content) {
           const input = truncate(JSON.stringify(item.input || {}), 400);
           msgs.push({
             role: 'tool_use', ts: l.timestamp, toolName: item.name, callId: item.id || null, input,
+            ...toolRenderData(item.name, item.input),
             text: item.name + ' ' + input,
           });
         }
@@ -1326,9 +1378,10 @@ function detailCodex(file, content) {
       else if (p.type === 'agent_reasoning' && p.text) msgs.push({ role: 'thinking', text: truncate(p.text, 600), ts: l.timestamp });
     } else if (l.type === 'response_item') {
       if (p.type === 'function_call' || p.type === 'custom_tool_call') {
-        const input = truncate(String(p.arguments ?? p.input ?? ''), 400);
+        const raw = p.arguments ?? p.input ?? '';
+        const input = truncate(String(raw), 400);
         msgs.push({ role: 'tool_use', ts: l.timestamp, toolName: p.name || '?', callId: p.call_id || null,
-          input, text: (p.name || '?') + ' ' + input });
+          input, ...toolRenderData(p.name, raw), text: (p.name || '?') + ' ' + input });
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
         const out = typeof p.output === 'string' ? p.output : (p.output && p.output.content) || JSON.stringify(p.output || '');
         const output = truncate(String(out), 600);
@@ -1373,7 +1426,7 @@ function detailOpenClaw(file, content) {
           const raw = item.arguments ?? item.input ?? {};
           const input = truncate(typeof raw === 'string' ? raw : JSON.stringify(raw), 400);
           msgs.push({ role: 'tool_use', ts, toolName: item.name || '?', callId: item.id || null,
-            input, text: (item.name || '?') + ' ' + input });
+            input, ...toolRenderData(item.name, raw), text: (item.name || '?') + ' ' + input });
         }
       }
     } else if (m.role === 'toolResult') {

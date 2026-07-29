@@ -198,6 +198,41 @@ test('renders Claude Code subagent launch and completion as agent events', () =>
   assert.equal(detail[1].title, 'Find benchmarks');
 });
 
+test('preserves structured Edit arguments for diff rendering', () => {
+  const edit = {
+    type: 'assistant', timestamp: '2026-07-18T00:00:00Z', message: { content: [{
+      type: 'tool_use', id: 'edit-1', name: 'Edit', input: {
+        file_path: '/tmp/example.js', old_string: 'const old = true;\n',
+        new_string: 'const updated = true;\n', replace_all: true,
+      },
+    }] },
+  };
+  const [message] = detailClaude('/tmp/project/main.jsonl', JSON.stringify(edit));
+
+  assert.deepEqual(message.edit, {
+    path: '/tmp/example.js', oldText: 'const old = true;\n',
+    newText: 'const updated = true;\n', replaceAll: true,
+  });
+  assert.ok(message.input.includes('old_string'));
+});
+
+test('preserves Bash commands and Write content for specialized rendering', () => {
+  const row = {
+    type: 'assistant', timestamp: '2026-07-18T00:00:00Z', message: { content: [
+      { type: 'tool_use', id: 'bash-1', name: 'Bash', input: { command: 'npm test\necho done' } },
+      { type: 'tool_use', id: 'write-1', name: 'Write', input: {
+        file_path: '/tmp/new.txt', content: 'first line\nsecond line\n',
+      } },
+    ] },
+  };
+  const detail = detailClaude('/tmp/project/main.jsonl', JSON.stringify(row));
+
+  assert.deepEqual(detail[0].bash, { command: 'npm test\necho done' });
+  assert.deepEqual(detail[1].write, {
+    path: '/tmp/new.txt', content: 'first line\nsecond line\n',
+  });
+});
+
 test('renders context compaction events from supported logs', () => {
   const claude = detailClaude('/tmp/project/main.jsonl', JSON.stringify({
     type: 'system', subtype: 'compact_boundary', timestamp: '2026-07-18T00:00:00Z',

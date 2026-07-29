@@ -122,6 +122,18 @@
   .tool-detail-label:first-child { margin-top: 0; }
   .tool-detail-value { white-space: pre-wrap; word-break: break-word; font: 12px/1.5 ui-monospace, Menlo, monospace; }
   .tool-detail-value.markdown-body { white-space: normal; font-family: inherit; }
+  .edit-diff { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; background: #10131a;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .edit-diff-head { position: sticky; left: 0; padding: 5px 9px; border-bottom: 1px solid var(--border);
+    color: var(--dim); background: var(--panel2); white-space: nowrap; }
+  .edit-diff-line { display: flex; min-width: max-content; white-space: pre; }
+  .edit-diff-mark { width: 24px; padding-left: 8px; flex: 0 0 24px; user-select: none; color: var(--dim); }
+  .edit-diff-text { padding-right: 10px; }
+  .edit-diff-line.del { background: rgba(247, 118, 142, .14); color: #f2a0b1; }
+  .edit-diff-line.add { background: rgba(158, 206, 106, .14); color: #b9df91; }
+  .bash-block { margin: 0; max-width: 100%; overflow-x: auto; padding: 9px 11px; border: 1px solid var(--border);
+    border-radius: 6px; background: #10131a; color: #c8d3f5; white-space: pre;
+    font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; -webkit-overflow-scrolling: touch; }
   .msg.divider { color: var(--accent); font-size: 12px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
   .msg.compaction { display: flex; align-items: center; gap: 9px; color: var(--dim); font-size: 12px; }
   .msg.compaction::before, .msg.compaction::after { content: ''; height: 1px; background: var(--border); flex: 1; }
@@ -425,6 +437,50 @@ function toolName(m) {
   return match ? match[0] : '工具';
 }
 
+function renderEditDiff(edit) {
+  const diff = el('div', 'edit-diff');
+  const title = (edit.path || 'Edit') + (edit.replaceAll ? ' · replace all' : '');
+  diff.appendChild(el('div', 'edit-diff-head', title));
+  const oldLines = String(edit.oldText).split('\n');
+  const newLines = String(edit.newText).split('\n');
+  let prefix = 0;
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < oldLines.length - prefix && suffix < newLines.length - prefix &&
+      oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]) suffix++;
+
+  const addLine = (kind, mark, text) => {
+    const row = el('div', 'edit-diff-line ' + kind);
+    row.appendChild(el('span', 'edit-diff-mark', mark));
+    row.appendChild(el('span', 'edit-diff-text', text || ' '));
+    diff.appendChild(row);
+  };
+  oldLines.slice(0, prefix).forEach(line => addLine('ctx', ' ', line));
+  oldLines.slice(prefix, oldLines.length - suffix).forEach(line => addLine('del', '−', line));
+  newLines.slice(prefix, newLines.length - suffix).forEach(line => addLine('add', '+', line));
+  if (suffix) oldLines.slice(oldLines.length - suffix).forEach(line => addLine('ctx', ' ', line));
+  return diff;
+}
+
+function renderWriteDiff(write) {
+  const diff = el('div', 'edit-diff');
+  diff.appendChild(el('div', 'edit-diff-head', write.path || 'Write'));
+  String(write.content).split('\n').forEach(line => {
+    const row = el('div', 'edit-diff-line add');
+    row.appendChild(el('span', 'edit-diff-mark', '+'));
+    row.appendChild(el('span', 'edit-diff-text', line || ' '));
+    diff.appendChild(row);
+  });
+  return diff;
+}
+
+function renderBash(text) {
+  const pre = el('pre', 'bash-block');
+  const code = el('code', 'language-bash', text || ' ');
+  pre.appendChild(code);
+  return pre;
+}
+
 function renderActivity(messages, start, sessionFile) {
   const key = sessionFile + ':activity:' + start;
   const activity = expandable('details', 'activity', key);
@@ -474,11 +530,20 @@ function renderActivity(messages, start, sessionFile) {
     const detail = el('div', 'tool-detail');
     if (call.use) {
       detail.appendChild(el('div', 'tool-detail-label', '工具调用'));
-      detail.appendChild(el('div', 'tool-detail-value', call.use.input || call.use.text));
+      detail.appendChild(call.use.edit
+        ? renderEditDiff(call.use.edit)
+        : call.use.write
+          ? renderWriteDiff(call.use.write)
+          : call.use.bash
+            ? renderBash(call.use.bash.command)
+        : el('div', 'tool-detail-value', call.use.input || call.use.text));
     }
     detail.appendChild(el('div', 'tool-detail-label', '工具结果'));
-    detail.appendChild(el('div', 'tool-detail-value', call.results.length
-      ? call.results.map(r => r.output || r.text).join('\n') : '（暂无结果）'));
+    const resultText = call.results.length
+      ? call.results.map(r => r.output || r.text).join('\n') : '（暂无结果）';
+    detail.appendChild(call.use && call.use.bash
+      ? renderBash(resultText)
+      : el('div', 'tool-detail-value', resultText));
     item.appendChild(detail);
     list.appendChild(item);
   });
