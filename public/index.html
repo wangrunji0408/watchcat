@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Watchcat · Agent 会话监控</title>
+<title>Watchcat · Agent Session Monitor</title>
 <style>
   :root {
     --bg: #0f1117; --panel: #171a23; --panel2: #1e2230; --border: #2a2f3f;
@@ -143,6 +143,7 @@
     border-radius: 8px; padding: 4px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
   .stats-btn:hover { border-color: var(--accent); }
   .stats-btn.active { border-color: var(--accent); color: var(--accent); }
+  .lang-btn { min-width: 42px; }
 
   /* ---------- 统计页 ---------- */
   .stats-page { max-width: 1080px; margin: 0 auto; }
@@ -226,22 +227,72 @@
 </head>
 <body>
 <header>
-  <h1>🐈 Watchcat</h1>
+  <h1>🐱 Watchcat</h1>
   <span class="sub" id="stats"></span>
   <div class="spacer"></div>
-  <button class="stats-btn" id="statsToggle">📊 统计</button>
+  <button class="stats-btn lang-btn" id="langToggle" title="切换到中文">中文</button>
+  <button class="stats-btn" id="statsToggle">📊 Stats</button>
   <div class="legend">
-    <span class="dot running"></span><span class="txt">运行中</span>
-    <span class="dot open"></span><span class="txt">存活</span>
-    <span class="dot idle"></span><span class="txt">空闲</span>
+    <span class="dot running"></span><span class="txt" id="legendRunning">Running</span>
+    <span class="dot open"></span><span class="txt" id="legendOpen">Open</span>
+    <span class="dot idle"></span><span class="txt" id="legendIdle">Idle</span>
   </div>
 </header>
 <div class="layout">
-  <div class="sidebar" id="sidebar"><div class="empty">加载中…</div></div>
-  <div class="main" id="main"><div class="empty">选择左侧会话查看日志</div></div>
+  <div class="sidebar" id="sidebar"><div class="empty">Loading…</div></div>
+  <div class="main" id="main"><div class="empty">Select a session to view its log</div></div>
 </div>
 <script src="/vendor/marked.min.js"></script>
 <script>
+const MESSAGES = {
+  en: {
+    pageTitle: 'Watchcat · Agent Session Monitor', stats: '📊 Stats', running: 'Running', open: 'Open', idle: 'Idle',
+    switchLanguage: '切换到中文', switchLabel: '中文', loading: 'Loading…', selectSession: 'Select a session to view its log',
+    secondsAgo: '{n}s ago', minutesAgo: '{n}m ago', hoursAgo: '{n}h ago', daysAgo: '{n}d ago',
+    unknownPrice: 'Price unknown', missingPrice: 'No official API price for: {names}', noUsage: 'No billable token usage',
+    priceEstimate: 'Estimated from published Standard API prices (USD)', input: 'Input', cacheRead: 'cache read', cacheWrite: 'cache write', output: 'output',
+    excludesModels: 'Excludes unpriced models: {names}', tool: 'Tool', toolCalls: '{n} tool calls', thinking: 'Thinking', toolResult: 'Tool result',
+    toolUse: 'Tool call', noResult: '(No result yet)', other: 'Other', noCostData: 'No cost data for this period', noCost: 'No cost', total: 'Total',
+    totalCost: 'Total cost', turns: 'Message turns', activeSessions: 'Active sessions', less: 'Less', more: 'More',
+    remainingProjects: '{n} other projects · {cost}', back: '‹ Back', last7: 'Last 7 days', last30: 'Last 30 days', last90: 'Last 90 days', all: 'All',
+    avgDailyCost: 'Avg. daily cost (active days)', activeDays: 'Active days', unknownPrices: 'Unpriced models (excluded): {names}',
+    dailyCost: 'Daily cost', dailyCostSub: 'Estimated from Standard API prices, split by model', modelShare: 'Cost by model', modelShareSub: 'Cumulative model cost for the selected period',
+    activity: 'Activity', activitySub: 'Daily user and assistant message turns (all sources)', projectTop: 'Top 10 projects by cost', projectTopSub: 'Cumulative cost by session project',
+    statsLoadFailed: 'Failed to load stats: {error}', refreshFailed: 'Refresh failed: {error}', parentSession: 'Parent session: {id}', rounds: '{n} turns',
+    runningCount: '{n} running', sessions: '{n} sessions', projectsSummary: '{projects} projects · {sessions} sessions', sshErrors: 'SSH errors', noSessions: 'No session logs found',
+    model: 'Model {name}', thinkingEffort: 'Thinking effort {value}', user: 'User', assistant: 'Assistant', agentStarted: 'Agent started', agentCompleted: 'Agent completed',
+    agentFailed: 'Agent failed', agentTimeout: 'Agent timed out', agentCancelled: 'Agent cancelled', agentAborted: 'Agent aborted', agentStatus: 'Agent status',
+    viewSubagent: 'View subagent log', automatic: 'automatic', manual: 'manual', beforeCompaction: '{n} tokens before compaction', compacted: 'Context compacted',
+    noMessages: 'No messages to display', loadFailed: 'Failed to load: {error}', jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun',
+    jul: 'Jul', aug: 'Aug', sep: 'Sep', oct: 'Oct', nov: 'Nov', dec: 'Dec', mon: 'M', wed: 'W', fri: 'F'
+  },
+  zh: {
+    pageTitle: 'Watchcat · Agent 会话监控', stats: '📊 统计', running: '运行中', open: '存活', idle: '空闲',
+    switchLanguage: 'Switch to English', switchLabel: 'EN', loading: '加载中…', selectSession: '选择左侧会话查看日志',
+    secondsAgo: '{n} 秒前', minutesAgo: '{n} 分钟前', hoursAgo: '{n} 小时前', daysAgo: '{n} 天前',
+    unknownPrice: '价格未知', missingPrice: '未收录官方 API 单价：{names}', noUsage: '没有可计算的 token 用量',
+    priceEstimate: '按 Standard API 公开单价估算（USD）', input: '输入', cacheRead: '缓存读取', cacheWrite: '缓存写入', output: '输出',
+    excludesModels: '不含未定价模型：{names}', tool: '工具', toolCalls: '调用了 {n} 次工具', thinking: '思考', toolResult: '工具结果',
+    toolUse: '工具调用', noResult: '（暂无结果）', other: '其他', noCostData: '所选时间内没有成本数据', noCost: '无成本', total: '合计',
+    totalCost: '总成本', turns: '消息轮次', activeSessions: '活跃会话', less: '少', more: '多',
+    remainingProjects: '其余 {n} 个项目合计 {cost}', back: '‹ 返回', last7: '近 7 天', last30: '近 30 天', last90: '近 90 天', all: '全部',
+    avgDailyCost: '日均成本（活跃日）', activeDays: '活跃天数', unknownPrices: '未收录单价（不计成本）：{names}',
+    dailyCost: '每日成本', dailyCostSub: '按 Standard API 单价估算，柱内按模型细分', modelShare: '模型成本占比', modelShareSub: '所选时间范围内各模型累计成本',
+    activity: '活跃热力图', activitySub: '每日用户与助手消息轮次（所有来源）', projectTop: '项目成本 Top 10', projectTopSub: '按会话所属项目累计',
+    statsLoadFailed: '统计加载失败：{error}', refreshFailed: '刷新失败：{error}', parentSession: '父会话：{id}', rounds: '{n} 轮',
+    runningCount: '{n} 运行', sessions: '{n} 会话', projectsSummary: '{projects} 项目 · {sessions} 会话', sshErrors: 'SSH 异常', noSessions: '没有找到任何会话日志',
+    model: '模型 {name}', thinkingEffort: '思考强度 {value}', user: '用户', assistant: '助手', agentStarted: 'Agent 已创建', agentCompleted: 'Agent 完成',
+    agentFailed: 'Agent 失败', agentTimeout: 'Agent 超时', agentCancelled: 'Agent 已取消', agentAborted: 'Agent 已中止', agentStatus: 'Agent 状态',
+    viewSubagent: '点击查看 subagent 记录', automatic: '自动', manual: '手动', beforeCompaction: '压缩前 {n} tokens', compacted: '上下文已压缩',
+    noMessages: '没有可显示的消息', loadFailed: '加载失败：{error}', jan: '1月', feb: '2月', mar: '3月', apr: '4月', may: '5月', jun: '6月',
+    jul: '7月', aug: '8月', sep: '9月', oct: '10月', nov: '11月', dec: '12月', mon: '一', wed: '三', fri: '五'
+  },
+};
+let language = localStorage.getItem('watchcat-language') || (navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en');
+function t(key, vars = {}) {
+  return (MESSAGES[language][key] || MESSAGES.en[key] || key).replace(/\{(\w+)\}/g, (_, name) => vars[name] ?? '');
+}
+
 const state = {
   activeFile: null,
   activeSession: null,
@@ -255,6 +306,22 @@ const state = {
   statsData: null,
   statsAt: 0,
 };
+
+function applyLanguage() {
+  document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
+  document.title = t('pageTitle');
+  document.getElementById('statsToggle').textContent = t('stats');
+  document.getElementById('legendRunning').textContent = t('running');
+  document.getElementById('legendOpen').textContent = t('open');
+  document.getElementById('legendIdle').textContent = t('idle');
+  const toggle = document.getElementById('langToggle');
+  toggle.textContent = t('switchLabel');
+  toggle.title = t('switchLanguage');
+  if (state.data) renderSidebar();
+  if (state.statsOpen && state.statsData) renderStats();
+  else if (state.activeSession) openSession(state.activeSession, true);
+  else document.getElementById('main').innerHTML = '<div class="empty">' + t('selectSession') + '</div>';
+}
 
 // ---------- 各来源 logo (内嵌 SVG 近似图形) ----------
 const LOGOS = {
@@ -303,10 +370,10 @@ function fmtTime(ts) {
 function fmtAge(ts) {
   if (!ts) return '';
   const s = (Date.now() - Date.parse(ts)) / 1000;
-  if (s < 60) return Math.floor(s) + ' 秒前';
-  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
-  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
-  return Math.floor(s / 86400) + ' 天前';
+  if (s < 60) return t('secondsAgo', { n: Math.floor(s) });
+  if (s < 3600) return t('minutesAgo', { n: Math.floor(s / 60) });
+  if (s < 86400) return t('hoursAgo', { n: Math.floor(s / 3600) });
+  return t('daysAgo', { n: Math.floor(s / 86400) });
 }
 function fmtK(n) {
   if (n == null) return '';
@@ -319,24 +386,24 @@ function fmtUsd(n) {
   return '$' + n.toFixed(2);
 }
 function costText(cost) {
-  if (!cost || cost.usd == null) return '价格未知';
+  if (!cost || cost.usd == null) return t('unknownPrice');
   return fmtUsd(cost.usd) + (cost.complete ? '' : '+');
 }
 function costTitle(s) {
   if (!s.cost || s.cost.usd == null) {
     const names = s.cost && s.cost.unknownModels || s.models || [];
-    return names.length ? '未收录官方 API 单价：' + names.join(', ') : '没有可计算的 token 用量';
+    return names.length ? t('missingPrice', { names: names.join(', ') }) : t('noUsage');
   }
   const u = s.usage || {};
   const rows = [
-    '按 Standard API 公开单价估算（USD）',
-    '输入 ' + Number(u.inputTokens || 0).toLocaleString() +
-      ' · 缓存读取 ' + Number(u.cachedInputTokens || 0).toLocaleString() +
-      ' · 缓存写入 ' + Number((u.cacheWriteTokens || 0) + (u.cacheWrite1hTokens || 0)).toLocaleString() +
-      ' · 输出 ' + Number(u.outputTokens || 0).toLocaleString(),
+    t('priceEstimate'),
+    t('input') + ' ' + Number(u.inputTokens || 0).toLocaleString() +
+      ' · ' + t('cacheRead') + ' ' + Number(u.cachedInputTokens || 0).toLocaleString() +
+      ' · ' + t('cacheWrite') + ' ' + Number((u.cacheWriteTokens || 0) + (u.cacheWrite1hTokens || 0)).toLocaleString() +
+      ' · ' + t('output') + ' ' + Number(u.outputTokens || 0).toLocaleString(),
   ];
   if (!s.cost.complete && s.cost.unknownModels && s.cost.unknownModels.length) {
-    rows.push('不含未定价模型：' + s.cost.unknownModels.join(', '));
+    rows.push(t('excludesModels', { names: s.cost.unknownModels.join(', ') }));
   }
   return rows.join('\n');
 }
@@ -439,7 +506,7 @@ function expandable(tag, cls, key) {
 function toolName(m) {
   if (m.toolName) return m.toolName;
   const match = String(m.text || '').match(/^\S+/);
-  return match ? match[0] : '工具';
+  return match ? match[0] : t('tool');
 }
 
 function renderEditDiff(edit) {
@@ -512,7 +579,7 @@ function renderActivity(messages, start, sessionFile) {
     }
   });
 
-  const label = calls.length ? '调用了 ' + calls.length + ' 次工具' : '思考';
+  const label = calls.length ? t('toolCalls', { n: calls.length }) : t('thinking');
   activity.appendChild(el('summary', null, label));
   const list = el('div', 'activity-list');
 
@@ -520,7 +587,7 @@ function renderActivity(messages, start, sessionFile) {
     if (row.type === 'thought') {
       const m = row.message;
       const thought = expandable('details', 'thought-item', key + ':thought:' + row.timelineIndex);
-      thought.appendChild(el('summary', null, '思考' + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
+      thought.appendChild(el('summary', null, t('thinking') + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
       const detail = el('div', 'tool-detail');
       detail.appendChild(renderMarkdown(m.text, 'tool-detail-value markdown-body'));
       thought.appendChild(detail);
@@ -530,11 +597,11 @@ function renderActivity(messages, start, sessionFile) {
 
     const call = row.call;
     const item = expandable('details', 'tool-item', key + ':tool:' + row.timelineIndex);
-    const name = call.use ? toolName(call.use) : (call.results[0] && toolName(call.results[0])) || '工具结果';
+    const name = call.use ? toolName(call.use) : (call.results[0] && toolName(call.results[0])) || t('toolResult');
     item.appendChild(el('summary', null, name + (call.use && call.use.ts ? ' · ' + fmtTime(call.use.ts) : '')));
     const detail = el('div', 'tool-detail');
     if (call.use) {
-      detail.appendChild(el('div', 'tool-detail-label', '工具调用'));
+      detail.appendChild(el('div', 'tool-detail-label', t('toolUse')));
       detail.appendChild(call.use.edit
         ? renderEditDiff(call.use.edit)
         : call.use.write
@@ -543,9 +610,9 @@ function renderActivity(messages, start, sessionFile) {
             ? renderBash(call.use.bash.command)
         : el('div', 'tool-detail-value', call.use.input || call.use.text));
     }
-    detail.appendChild(el('div', 'tool-detail-label', '工具结果'));
+    detail.appendChild(el('div', 'tool-detail-label', t('toolResult')));
     const resultText = call.results.length
-      ? call.results.map(r => r.output || r.text).join('\n') : '（暂无结果）';
+      ? call.results.map(r => r.output || r.text).join('\n') : t('noResult');
     detail.appendChild(call.use && call.use.bash
       ? renderBash(resultText)
       : el('div', 'tool-detail-value', resultText));
@@ -630,7 +697,7 @@ function modelColorMap(models) {
 }
 
 function displayModel(colorMap, model) {
-  return colorMap.get(model) === OTHER_COLOR ? '其他' : model;
+  return colorMap.get(model) === OTHER_COLOR ? t('other') : model;
 }
 
 function chartCard(page, title, sub) {
@@ -663,7 +730,7 @@ function drawDailyCost(card, daily, colorMap) {
     const m = byDay.get(r.date);
     m.set(name, (m.get(name) || 0) + r.usd);
   }
-  if (!byDay.size) { card.appendChild(el('div', 'chart-sub', '所选时间内没有成本数据')); return; }
+  if (!byDay.size) { card.appendChild(el('div', 'chart-sub', t('noCostData'))); return; }
 
   // 连续日期轴(包含零成本的日子),从范围起点(或最早数据)到今天
   const dates = [...byDay.keys()].sort();
@@ -731,12 +798,12 @@ function drawDailyCost(card, daily, colorMap) {
       const total = acc;
       showTip(e.clientX, e.clientY, tip => {
         tip.appendChild(el('div', 'tt-title', day));
-        if (!segs || !total) { tipRow(tip, null, '无成本', '$0'); return; }
+        if (!segs || !total) { tipRow(tip, null, t('noCost'), '$0'); return; }
         for (const name of seriesNames) {
           const v = segs.get(name) || 0;
           if (v > 0) tipRow(tip, seriesColorByName(colorMap, name), name, fmtUsd(v));
         }
-        tipRow(tip, null, '合计', fmtUsd(total));
+        tipRow(tip, null, t('total'), fmtUsd(total));
       });
     };
     hit.addEventListener('pointermove', show);
@@ -750,7 +817,7 @@ function drawDailyCost(card, daily, colorMap) {
 }
 
 function seriesColorByName(colorMap, name) {
-  if (name === '其他') return OTHER_COLOR;
+  if (name === t('other')) return OTHER_COLOR;
   for (const [model, color] of colorMap) if (model === name) return color;
   return OTHER_COLOR;
 }
@@ -763,10 +830,11 @@ function drawModelPie(card, daily, colorMap) {
     totals.set(name, (totals.get(name) || 0) + r.usd);
   }
   const all = [...totals.entries()].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-  if (!all.length) { card.appendChild(el('div', 'chart-sub', '所选时间内没有成本数据')); return; }
+  if (!all.length) { card.appendChild(el('div', 'chart-sub', t('noCostData'))); return; }
   const top = all.slice(0, 5);
   const tail = all.slice(5).reduce((a, [, v]) => a + v, 0);
-  const slices = tail > 0 ? [...top.filter(([n]) => n !== '其他'), ['其他', tail + (top.find(([n]) => n === '其他')?.[1] || 0)]] : top;
+  const other = t('other');
+  const slices = tail > 0 ? [...top.filter(([n]) => n !== other), [other, tail + (top.find(([n]) => n === other)?.[1] || 0)]] : top;
   const total = slices.reduce((a, [, v]) => a + v, 0);
 
   const size = 220, cx = size / 2, cy = size / 2, r1 = 100, r0 = 58;
@@ -803,7 +871,7 @@ function drawModelPie(card, daily, colorMap) {
   center.setAttribute('fill', '#d8dce8');
   svg.appendChild(center);
   const centerSub = svgEl('text', { x: cx, y: cy + 18, 'text-anchor': 'middle' });
-  centerSub.textContent = '总成本';
+  centerSub.textContent = t('totalCost');
   svg.appendChild(centerSub);
 
   const list = el('div');
@@ -855,10 +923,10 @@ function drawHeatmap(card, activity, cutoffKey) {
   const svg = svgEl('svg', { class: 'chart-svg', viewBox: `0 0 ${width} ${height}`, width, height });
   svg.style.maxWidth = 'none';
 
-  ['一', '三', '五'].forEach((txt, i) => {
-    const t = svgEl('text', { x: left - 6, y: top + (i * 2) * (cell + gap) + cell - 2, 'text-anchor': 'end' });
-    t.textContent = txt;
-    svg.appendChild(t);
+  [t('mon'), t('wed'), t('fri')].forEach((txt, i) => {
+    const label = svgEl('text', { x: left - 6, y: top + (i * 2) * (cell + gap) + cell - 2, 'text-anchor': 'end' });
+    label.textContent = txt;
+    svg.appendChild(label);
   });
 
   let lastMonth = -1;
@@ -870,9 +938,9 @@ function drawHeatmap(card, activity, cutoffKey) {
       const key = dateKeyLocal(d);
       if (dow === 0 && d.getMonth() !== lastMonth) {
         lastMonth = d.getMonth();
-        const t = svgEl('text', { x: left + w * (cell + gap), y: 10 });
-        t.textContent = (lastMonth + 1) + '月';
-        svg.appendChild(t);
+        const label = svgEl('text', { x: left + w * (cell + gap), y: 10 });
+        label.textContent = t(['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'][lastMonth]);
+        svg.appendChild(label);
       }
       const a = byDay.get(key);
       const rect = svgEl('rect', {
@@ -881,8 +949,8 @@ function drawHeatmap(card, activity, cutoffKey) {
       });
       const show = e => showTip(e.clientX, e.clientY, tip => {
         tip.appendChild(el('div', 'tt-title', key));
-        tipRow(tip, null, '消息轮次', String(a ? a.turns : 0));
-        if (a && a.sessions) tipRow(tip, null, '活跃会话', String(a.sessions));
+        tipRow(tip, null, t('turns'), String(a ? a.turns : 0));
+        if (a && a.sessions) tipRow(tip, null, t('activeSessions'), String(a.sessions));
       });
       rect.addEventListener('pointermove', show);
       rect.addEventListener('pointerleave', hideTip);
@@ -893,13 +961,13 @@ function drawHeatmap(card, activity, cutoffKey) {
   card.appendChild(scroll);
 
   const scale = el('div', 'heatmap-scale');
-  scale.appendChild(el('span', null, '少'));
+  scale.appendChild(el('span', null, t('less')));
   for (const c of HEAT_COLORS) {
     const s = el('span', 'cell');
     s.style.background = c;
     scale.appendChild(s);
   }
-  scale.appendChild(el('span', null, '多'));
+  scale.appendChild(el('span', null, t('more')));
   card.appendChild(scale);
   scroll.scrollLeft = scroll.scrollWidth;
 }
@@ -913,7 +981,7 @@ function drawTopProjects(card, projectDaily) {
     totals.set(r.project, cur);
   }
   const rows = [...totals.values()].filter(p => p.usd > 0).sort((a, b) => b.usd - a.usd);
-  if (!rows.length) { card.appendChild(el('div', 'chart-sub', '所选时间内没有成本数据')); return; }
+  if (!rows.length) { card.appendChild(el('div', 'chart-sub', t('noCostData'))); return; }
   const top = rows.slice(0, 10);
   const max = top[0].usd;
   for (const p of top) {
@@ -931,7 +999,7 @@ function drawTopProjects(card, projectDaily) {
   }
   if (rows.length > 10) {
     const restUsd = rows.slice(10).reduce((a, p) => a + p.usd, 0);
-    card.appendChild(el('div', 'chart-sub', '其余 ' + (rows.length - 10) + ' 个项目合计 ' + fmtUsd(restUsd)));
+    card.appendChild(el('div', 'chart-sub', t('remainingProjects', { n: rows.length - 10, cost: fmtUsd(restUsd) })));
   }
 }
 
@@ -939,16 +1007,16 @@ function renderStats() {
   const main = document.getElementById('main');
   const d = state.statsData;
   main.innerHTML = '';
-  if (!d) { main.appendChild(el('div', 'empty', '加载中…')); return; }
+  if (!d) { main.appendChild(el('div', 'empty', t('loading'))); return; }
   const page = el('div', 'stats-page');
   main.appendChild(page);
 
   // 顶栏:返回(移动端) + 时间范围
   const filter = el('div', 'stats-filter');
-  const back = el('button', 'back-btn', '‹ 返回');
+  const back = el('button', 'back-btn', t('back'));
   back.onclick = closeStats;
   filter.appendChild(back);
-  for (const [label, days] of [['近 7 天', 7], ['近 30 天', 30], ['近 90 天', 90], ['全部', 0]]) {
+  for (const [label, days] of [[t('last7'), 7], [t('last30'), 30], [t('last90'), 90], [t('all'), 0]]) {
     const btn = el('button', 'range-btn' + (state.statsRange === days ? ' active' : ''), label);
     btn.onclick = () => { state.statsRange = days; renderStats(); };
     filter.appendChild(btn);
@@ -966,10 +1034,10 @@ function renderStats() {
   const activeDays = new Set(daily.filter(r => r.usd > 0).map(r => r.date)).size;
   const totalTurns = activity.reduce((a, r) => a + r.turns, 0);
   const kpis = [
-    ['总成本', fmtUsd(totalUsd)],
-    ['日均成本(活跃日)', activeDays ? fmtUsd(totalUsd / activeDays) : '$0.00'],
-    ['活跃天数', String(activity.length)],
-    ['消息轮次', totalTurns.toLocaleString()],
+    [t('totalCost'), fmtUsd(totalUsd)],
+    [t('avgDailyCost'), activeDays ? fmtUsd(totalUsd / activeDays) : '$0.00'],
+    [t('activeDays'), String(activity.length)],
+    [t('turns'), totalTurns.toLocaleString()],
   ];
   const kpiRow = el('div', 'kpi-row');
   for (const [label, value] of kpis) {
@@ -981,18 +1049,18 @@ function renderStats() {
   page.appendChild(kpiRow);
 
   const unknownNote = d.unknownModels && d.unknownModels.length
-    ? '未收录单价(不计成本): ' + d.unknownModels.join(', ') : '';
+    ? t('unknownPrices', { names: d.unknownModels.join(', ') }) : '';
 
-  const c1 = chartCard(page, '每日成本', '按 Standard API 单价估算,柱内按模型细分' + (unknownNote ? ' · ' + unknownNote : ''));
+  const c1 = chartCard(page, t('dailyCost'), t('dailyCostSub') + (unknownNote ? ' · ' + unknownNote : ''));
   drawDailyCost(c1, daily, colorMap);
 
-  const c2 = chartCard(page, '模型成本占比', '所选时间范围内各模型累计成本');
+  const c2 = chartCard(page, t('modelShare'), t('modelShareSub'));
   drawModelPie(c2, daily, colorMap);
 
-  const c3 = chartCard(page, '活跃热力图', '每日用户与助手消息轮次(所有来源)');
+  const c3 = chartCard(page, t('activity'), t('activitySub'));
   drawHeatmap(c3, d.activity, cutoffKey);
 
-  const c4 = chartCard(page, '项目成本 Top 10', '按会话所属项目累计');
+  const c4 = chartCard(page, t('projectTop'), t('projectTopSub'));
   drawTopProjects(c4, projectDaily);
 }
 
@@ -1005,11 +1073,11 @@ async function openStats() {
   document.body.classList.add('detail-open');
   if (state.data) renderSidebar(); // 直接经 #stats 进入时会话列表可能尚未加载
   const main = document.getElementById('main');
-  if (!state.statsData) main.innerHTML = '<div class="empty">加载中…</div>';
+  if (!state.statsData) main.innerHTML = '<div class="empty">' + t('loading') + '</div>';
   try {
     await fetchStats();
   } catch (e) {
-    main.innerHTML = '<div class="empty">统计加载失败: ' + e.message + '</div>';
+    main.innerHTML = '<div class="empty">' + t('statsLoadFailed', { error: e.message }) + '</div>';
     return;
   }
   if (state.statsOpen) renderStats();
@@ -1019,7 +1087,7 @@ function closeStats() {
   state.statsOpen = false;
   document.getElementById('statsToggle').classList.remove('active');
   document.body.classList.remove('detail-open');
-  document.getElementById('main').innerHTML = '<div class="empty">选择左侧会话查看日志</div>';
+  document.getElementById('main').innerHTML = '<div class="empty">' + t('selectSession') + '</div>';
 }
 
 async function refresh() {
@@ -1035,7 +1103,7 @@ async function refresh() {
     }
     renderSidebar();
   } catch (e) {
-    document.getElementById('stats').textContent = '刷新失败: ' + e.message;
+    document.getElementById('stats').textContent = t('refreshFailed', { error: e.message });
   }
 }
 
@@ -1048,7 +1116,7 @@ function sessionRow(s, showProject) {
   row.appendChild(el('span', 'dot ' + s.status));
   const body = el('div', 'session-body');
   const title = el('div', 'session-title', (s.sessionKind === 'subagent' ? '↳ ' : '') + s.title);
-  if (s.parentSessionKey || s.parentSessionId) title.title = '父会话：' + (s.parentSessionKey || s.parentSessionId);
+  if (s.parentSessionKey || s.parentSessionId) title.title = t('parentSession', { id: s.parentSessionKey || s.parentSessionId });
   body.appendChild(title);
   const sub = el('div', 'session-sub');
   const parts = [];
@@ -1057,7 +1125,7 @@ function sessionRow(s, showProject) {
     sub.appendChild(p);
     sub.appendChild(document.createTextNode(' · '));
   }
-  sub.appendChild(document.createTextNode(fmtTime(s.lastTs) + ' · ' + s.turns + ' 轮'));
+  sub.appendChild(document.createTextNode(fmtTime(s.lastTs) + ' · ' + t('rounds', { n: s.turns })));
   if (s.sessionKind === 'subagent') {
     sub.appendChild(document.createTextNode(' · '));
     sub.appendChild(el('span', 'subagent-tag', 'subagent' + (s.subagentType ? '/' + s.subagentType : '')));
@@ -1112,10 +1180,10 @@ function renderSidebar() {
     const box = el('div', 'project hot' + (state.collapsed.has('##active') ? ' collapsed' : ''));
     const head = el('div', 'project-head');
     head.appendChild(el('span', 'chevron', '▼'));
-    const name = el('span', 'project-name', '运行中');
+    const name = el('span', 'project-name', t('running'));
     name.style.color = 'var(--green)';
     head.appendChild(name);
-    head.appendChild(el('span', 'project-meta', running + ' 运行'));
+    head.appendChild(el('span', 'project-meta', t('runningCount', { n: running })));
     head.onclick = () => { toggleGroup('##active'); box.classList.toggle('collapsed'); };
     box.appendChild(head);
     const list = el('div', 'session-list');
@@ -1129,7 +1197,7 @@ function renderSidebar() {
     const head = el('div', 'project-head');
     head.appendChild(el('span', 'chevron', '▼'));
     head.appendChild(el('span', 'project-name', p.name));
-    let metaText = (p.running ? '● ' + p.running + ' · ' : '') + p.sessions.length + ' 会话';
+    let metaText = (p.running ? '● ' + p.running + ' · ' : '') + t('sessions', { n: p.sessions.length });
     if (p.totalCost && p.totalCost.usd != null) metaText += ' · ' + fmtUsd(p.totalCost.usd);
     metaText += ' · ' + fmtAge(p.lastTs);
     const meta = el('span', 'project-meta', metaText);
@@ -1142,12 +1210,12 @@ function renderSidebar() {
     box.appendChild(list);
     sb.appendChild(box);
   }
-  if (!projects.length) sb.appendChild(el('div', 'empty', '没有找到任何会话日志'));
+  if (!projects.length) sb.appendChild(el('div', 'empty', t('noSessions')));
   document.getElementById('stats').textContent =
-    projects.length + ' 项目 · ' + total + ' 会话' + (running ? ' · ' + running + ' 运行中' : '') +
+    t('projectsSummary', { projects: projects.length, sessions: total }) + (running ? ' · ' + t('runningCount', { n: running }) : '') +
     (pricedSessions ? ' · ' + fmtUsd(totalCost) + (incompleteCosts ? '+' : '') : '') +
     (state.data.remoteHosts && state.data.remoteHosts.length ? ' · SSH ' + state.data.remoteHosts.join(', ') : '') +
-    (state.data.remoteErrors && state.data.remoteErrors.length ? ' · SSH 异常' : '');
+    (state.data.remoteErrors && state.data.remoteErrors.length ? ' · ' + t('sshErrors') : '');
 }
 
 function toggleGroup(key) {
@@ -1187,22 +1255,22 @@ async function openSession(s, keepScroll) {
   document.body.classList.add('detail-open');
   const main = document.getElementById('main');
   const wasAtBottom = keepScroll && main.scrollHeight - main.scrollTop - main.clientHeight < 80;
-  if (!keepScroll) main.innerHTML = '<div class="empty">加载中…</div>';
+  if (!keepScroll) main.innerHTML = '<div class="empty">' + t('loading') + '</div>';
   try {
     const res = await fetch('/api/session?file=' + encodeURIComponent(s.file));
     const data = await res.json();
     if (state.activeFile !== s.file) return; // 用户已切换
     main.innerHTML = '';
     const head = el('div', 'detail-head');
-    const back = el('button', 'back-btn' + (state.detailStack.length ? ' child-back' : ''), '‹ 返回');
+    const back = el('button', 'back-btn' + (state.detailStack.length ? ' child-back' : ''), t('back'));
     back.onclick = navigateBack;
     head.appendChild(back);
     const summary = el('div', 'detail-summary');
     summary.appendChild(el('div', null, (SRC_NAMES[s.source] || s.source) + ' · ' + s.title));
     const metrics = [];
     if (s.id) metrics.push('Session ID ' + s.id);
-    if (s.model) metrics.push('模型 ' + s.model + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));
-    if (s.thinkingEffort) metrics.push('思考强度 ' + s.thinkingEffort);
+    if (s.model) metrics.push(t('model', { name: s.model }) + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));
+    if (s.thinkingEffort) metrics.push(t('thinkingEffort', { value: s.thinkingEffort }));
     if (s.contextTokens != null) metrics.push(fmtK(s.contextTokens) + ' ctx');
     if (s.usage) metrics.push(costText(s.cost));
     const metricsNode = el('div', 'detail-metrics', metrics.join(' · '));
@@ -1210,22 +1278,22 @@ async function openSession(s, keepScroll) {
     summary.appendChild(metricsNode);
     head.appendChild(summary);
     main.appendChild(head);
-    const roleNames = { user: '用户', assistant: '助手' };
+    const roleNames = { user: t('user'), assistant: t('assistant') };
     for (let i = 0; i < data.messages.length;) {
       const m = data.messages[i];
       if (m.role === 'subagent') {
         const eventNames = {
-          started: 'Agent 已创建', completed: 'Agent 完成', failed: 'Agent 失败',
-          timeout: 'Agent 超时', cancelled: 'Agent 已取消', aborted: 'Agent 已中止',
+          started: t('agentStarted'), completed: t('agentCompleted'), failed: t('agentFailed'),
+          timeout: t('agentTimeout'), cancelled: t('agentCancelled'), aborted: t('agentAborted'),
         };
         const box = el('div', 'msg subagent-event');
-        box.appendChild(el('div', 'meta', (eventNames[m.event] || 'Agent 状态') + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
+        box.appendChild(el('div', 'meta', (eventNames[m.event] || t('agentStatus')) + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
         const card = el(m.subagent ? 'button' : 'div', 'subagent-card');
         if (m.subagent) card.type = 'button';
         card.appendChild(el('div', 'subagent-card-title', m.title || m.agentId || 'Subagent'));
         const details = [];
         if (m.subagent && m.subagent.model) details.push(m.subagent.model);
-        if (m.subagent) details.push('点击查看 subagent 记录');
+        if (m.subagent) details.push(t('viewSubagent'));
         card.appendChild(el('div', 'subagent-card-sub', details.join(' · ') || m.text || ''));
         if (m.subagent) card.onclick = () => openSubagent(m.subagent);
         box.appendChild(card);
@@ -1242,16 +1310,16 @@ async function openSession(s, keepScroll) {
       }
       if (m.role === 'compaction') {
         const details = [];
-        if (m.trigger) details.push(m.trigger === 'auto' ? '自动' : m.trigger === 'manual' ? '手动' : m.trigger);
+        if (m.trigger) details.push(m.trigger === 'auto' ? t('automatic') : m.trigger === 'manual' ? t('manual') : m.trigger);
         if (m.beforeTokens != null && m.afterTokens != null) {
           details.push(fmtK(m.beforeTokens) + ' → ' + fmtK(m.afterTokens) + ' tokens');
         } else if (m.beforeTokens != null) {
-          details.push('压缩前 ' + fmtK(m.beforeTokens) + ' tokens');
+          details.push(t('beforeCompaction', { n: fmtK(m.beforeTokens) }));
         }
         if (m.durationMs != null) details.push((m.durationMs / 1000).toFixed(1) + 's');
         if (m.ts) details.push(fmtTime(m.ts));
         const box = el('div', 'msg compaction');
-        box.appendChild(el('span', 'compaction-label', '上下文已压缩' + (details.length ? ' · ' + details.join(' · ') : '')));
+        box.appendChild(el('span', 'compaction-label', t('compacted') + (details.length ? ' · ' + details.join(' · ') : '')));
         main.appendChild(box);
         i++;
         continue;
@@ -1263,10 +1331,10 @@ async function openSession(s, keepScroll) {
       main.appendChild(box);
       i++;
     }
-    if (data.messages.length === 0) main.appendChild(el('div', 'empty', '没有可显示的消息'));
+    if (data.messages.length === 0) main.appendChild(el('div', 'empty', t('noMessages')));
     if (!keepScroll || wasAtBottom) main.scrollTop = main.scrollHeight;
   } catch (e) {
-    main.innerHTML = '<div class="empty">加载失败: ' + e.message + '</div>';
+    main.innerHTML = '<div class="empty">' + t('loadFailed', { error: e.message }) + '</div>';
   }
 }
 
@@ -1280,7 +1348,13 @@ function findActive() {
   return state.activeSession;
 }
 
+document.getElementById('langToggle').onclick = () => {
+  language = language === 'en' ? 'zh' : 'en';
+  localStorage.setItem('watchcat-language', language);
+  applyLanguage();
+};
 document.getElementById('statsToggle').onclick = () => state.statsOpen ? closeStats() : openStats();
+applyLanguage();
 if (location.hash === '#stats') openStats();
 
 refresh();

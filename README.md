@@ -1,38 +1,20 @@
-# 🐈 Watchcat
+# 🐱 Watchcat
 
-局域网可访问的本机 Agent 会话监控面板。扫描本机上 **Claude Code**、**Codex**、**OpenClaw** 和 **Hermes** 的 session log，按项目分组展示，并实时显示运行状态。
+[中文说明](README-CN.md)
 
-## 启动
+A local Agent session monitor accessible from your LAN.
+
+## Run
+
+Requires Node.js 18 or later.
 
 ```sh
 npm install
-node server.js
-# 或
 npm start
 ```
 
-启动后终端会打印本机与局域网访问地址（默认端口 3789，可用 `PORT=8080 node server.js` 修改）。局域网内任意设备打开 `http://<本机IP>:3789` 即可。
+Watchcat prints the local and LAN URLs at startup. It uses port `3789` by default; set a different port with `PORT=8080 npm start`.
 
-需要 Node.js ≥ 18。
+## Security
 
-## 功能
-
-- **数据来源**
-  - Claude Code：`~/.claude/projects/*/*.jsonl`，以及各会话下的 `subagents/agent-*.jsonl`；子代理会关联父会话并显示任务 description/type
-  - Codex（CLI / Desktop）：`~/.codex/sessions/**/*.jsonl`
-  - OpenClaw：`${OPENCLAW_STATE_DIR:-~/.openclaw}/agents/*/sessions/*.jsonl`；识别 agent、subagent、ACP 与 cron 会话，subagent 使用索引中的 label 并关联父会话
-  - Remote SSH：自动从 Codex Desktop 的活跃 SSH 连接发现远端主机，同时读取远端 Codex `$CODEX_HOME/sessions/**/*.jsonl` 和 Claude Code `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/*.jsonl`；也可用 `WATCHCAT_SSH_HOSTS=host1,host2` 显式配置
-  - Hermes：`~/.hermes/state.db`（只读打开 SQLite，需 Node ≥ 22.5 内置 `node:sqlite`，低版本自动跳过）
-- **按项目分组**：以会话记录中的 `cwd` 为项目维度；Hermes 会话无 cwd 时按来源渠道分组（如 `hermes://telegram`、`hermes://weixin`）。最近活动的项目排前，有运行中会话的项目置顶；网页中的项目列表默认折叠。
-- **运行状态**（每 5 秒自动刷新）
-  - 🟢 运行中：日志文件在最近 1 分钟内有写入，或被存活进程持有且 2 分钟内有活动；Hermes 以 gateway 进程存活 + 2 分钟内有新消息判定
-  - 🟡 进程存活：进程仍持有日志文件句柄（`lsof`）但近期无输出；Hermes 为 gateway 存活且会话未标记结束
-  - ⚫ 空闲：历史会话
-- **日志查看**：点击会话查看完整对话（用户、助手和思考内容使用 Markdown 渲染），思考过程与工具调用默认折叠展示，上下文压缩显示为独立时间线事件；subagent 不单独出现在项目列表中，其创建/完成事件嵌入主会话并可点击进入子会话记录；运行中的会话自动跟随最新输出滚动。
-- **模型与成本**：显示每个会话实际记录的模型名，并按 OpenAI / Anthropic Standard API 公开单价估算 token 成本（USD）；区分输入、缓存读写与输出 token，OpenAI 长上下文自动采用对应单价。没有可匹配官方价格的第三方模型显示“价格未知”。
-
-Remote SSH 使用本机现有 SSH 配置和密钥，以 `BatchMode` 只读访问远端。默认每轮读取每台主机最近的 10 个会话，并把已读取的历史日志以 `.jsonl` 持久保存在 `~/.watchcat/remote`；与本机会话一样，日志正文按需从文件读取，不常驻内存。即使会话退出最近列表或 SSH 暂时不可用，仍可查看本地缓存。可通过 `WATCHCAT_REMOTE_MAX_FILES`、`WATCHCAT_REMOTE_READ_CONCURRENCY` 和 `WATCHCAT_REMOTE_HISTORY_DIR` 调整。
-
-## 安全说明
-
-服务监听 `0.0.0.0`，会话日志及远端历史缓存可能包含敏感信息，请仅在可信局域网内使用。缓存目录和文件分别以 `0700`、`0600` 权限创建；日志读取接口做了路径白名单校验，只允许访问已扫描到的本地或远端会话日志。
+Watchcat listens on `0.0.0.0`, and session logs may contain sensitive information. Use it only on a trusted network.
