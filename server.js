@@ -1362,7 +1362,10 @@ function detailHermes(sessionId) {
         } catch {}
       }
     } else if (r.role === 'tool' && r.content) {
-      msgs.push({ role: 'tool_result', ts, text: (r.tool_name ? r.tool_name + ': ' : '') + truncate(r.content, 600) });
+      const isRead = isReadToolName(r.tool_name);
+      const output = isRead ? r.content : truncate(r.content, 600);
+      msgs.push({ role: 'tool_result', ts, toolName: r.tool_name || '?', output, text: output,
+        ...(isRead ? { readContent: r.content } : {}) });
     }
   }
   return msgs;
@@ -1389,6 +1392,11 @@ function shortToolName(name) {
   return String(name || '').split(/[.:/]/).pop().toLowerCase();
 }
 
+function isReadToolName(name) {
+  const short = shortToolName(name).replace(/[-_]/g, '');
+  return short === 'read' || short === 'readfile';
+}
+
 function parseToolArgs(raw) {
   let args = raw;
   if (typeof args === 'string') {
@@ -1413,11 +1421,24 @@ function extractWriteCall(name, raw) {
   };
 }
 
+function extractReadCall(name, raw) {
+  if (!isReadToolName(name)) return null;
+  const args = parseToolArgs(raw);
+  if (!args) return null;
+  return {
+    path: String(args.file_path ?? args.path ?? args.file ?? ''),
+    offset: args.offset == null ? null : Number(args.offset),
+    limit: args.limit == null ? null : Number(args.limit),
+    pages: args.pages == null ? null : String(args.pages),
+  };
+}
+
 function toolRenderData(name, raw) {
   return {
     edit: extractEditCall(name, raw),
     bash: extractBashCall(name, raw),
     write: extractWriteCall(name, raw),
+    read: extractReadCall(name, raw),
   };
 }
 
@@ -1425,6 +1446,7 @@ function detailClaude(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const isSubagent = path.basename(path.dirname(file)) === 'subagents';
   const msgs = [];
+  const readCalls = new Set();
   for (const l of lines) {
     if (l.isSidechain && !isSubagent) continue;
     if (l.type === 'system' && l.subtype === 'compact_boundary') {
@@ -1461,8 +1483,11 @@ function detailClaude(file, content) {
             msgs.push({ role: 'user', text: item.text, ts: l.timestamp });
           } else if (item.type === 'tool_result') {
             const text = extractText(item.content) || (typeof item.content === 'string' ? item.content : '');
-            const output = truncate(text, 600);
-            msgs.push({ role: 'tool_result', output, text: output, callId: item.tool_use_id || null, ts: l.timestamp });
+            const callId = item.tool_use_id || null;
+            const isRead = callId && readCalls.has(callId);
+            const output = isRead ? text : truncate(text, 600);
+            msgs.push({ role: 'tool_result', output, text: output, callId, ts: l.timestamp,
+              ...(isRead ? { readContent: text } : {}) });
           }
         }
       }
@@ -1474,9 +1499,11 @@ function detailClaude(file, content) {
           msgs.push({ role: 'thinking', text: truncate(item.thinking, 600), ts: l.timestamp });
         } else if (item.type === 'tool_use') {
           const input = truncate(JSON.stringify(item.input || {}), 400);
+          const renderData = toolRenderData(item.name, item.input);
+          if (renderData.read && item.id) readCalls.add(item.id);
           msgs.push({
             role: 'tool_use', ts: l.timestamp, toolName: item.name, callId: item.id || null, input,
-            ...toolRenderData(item.name, item.input),
+            ...renderData,
             text: item.name + ' ' + input,
           });
         }
@@ -1489,6 +1516,7 @@ function detailClaude(file, content) {
 function detailCodex(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
+  const readCalls = new Set();
   for (const l of lines) {
     const p = l.payload || {};
     if (l.type === 'compacted' || l.type === 'compaction' ||
@@ -1509,12 +1537,17 @@ function detailCodex(file, content) {
       if (p.type === 'function_call' || p.type === 'custom_tool_call') {
         const raw = p.arguments ?? p.input ?? '';
         const input = truncate(String(raw), 400);
+        const renderData = toolRenderData(p.name, raw);
+        if (renderData.read && p.call_id) readCalls.add(p.call_id);
         msgs.push({ role: 'tool_use', ts: l.timestamp, toolName: p.name || '?', callId: p.call_id || null,
-          input, ...toolRenderData(p.name, raw), text: (p.name || '?') + ' ' + input });
+          input, ...renderData, text: (p.name || '?') + ' ' + input });
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
         const out = typeof p.output === 'string' ? p.output : (p.output && p.output.content) || JSON.stringify(p.output || '');
-        const output = truncate(String(out), 600);
-        msgs.push({ role: 'tool_result', ts: l.timestamp, callId: p.call_id || null, output, text: output });
+        const rawOutput = String(out);
+        const isRead = p.call_id && readCalls.has(p.call_id);
+        const output = isRead ? rawOutput : truncate(rawOutput, 600);
+        msgs.push({ role: 'tool_result', ts: l.timestamp, callId: p.call_id || null, output, text: output,
+          ...(isRead ? { readContent: rawOutput } : {}) });
       }
     }
   }
@@ -1535,6 +1568,7 @@ function dshToolResultText(message) {
 function detailDsh(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
+  const readCalls = new Set();
   for (const l of lines) {
     const d = l.data || {};
     const ts = isoTime(l.time ?? l.createdAt);
@@ -1552,12 +1586,17 @@ function detailDsh(file, content) {
     } else if (l.type === 'tool/call') {
       const raw = d.arguments ?? '';
       const input = truncate(typeof raw === 'string' ? raw : JSON.stringify(raw), 400);
+      const renderData = toolRenderData(d.name, raw);
+      if (renderData.read && d.callId) readCalls.add(d.callId);
       msgs.push({ role: 'tool_use', ts, toolName: d.name || '?', callId: d.callId || null,
-        input, ...toolRenderData(d.name, raw), text: (d.name || '?') + ' ' + input });
+        input, ...renderData, text: (d.name || '?') + ' ' + input });
     } else if (l.type === 'tool/result') {
-      const output = truncate(dshToolResultText(d.message), 600);
+      const rawOutput = dshToolResultText(d.message);
       const callId = d.callId || d.message && d.message.source && d.message.source.callId || null;
-      msgs.push({ role: 'tool_result', ts, callId, output, text: output });
+      const isRead = callId && readCalls.has(callId);
+      const output = isRead ? rawOutput : truncate(rawOutput, 600);
+      msgs.push({ role: 'tool_result', ts, callId, output, text: output,
+        ...(isRead ? { readContent: rawOutput } : {}) });
     }
   }
   return msgs;
@@ -1566,6 +1605,7 @@ function detailDsh(file, content) {
 function detailOpenClaw(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
+  const readCalls = new Set();
   for (const l of lines) {
     if (l.type === 'compaction') {
       msgs.push({
@@ -1596,14 +1636,18 @@ function detailOpenClaw(file, content) {
         } else if (item.type === 'toolCall') {
           const raw = item.arguments ?? item.input ?? {};
           const input = truncate(typeof raw === 'string' ? raw : JSON.stringify(raw), 400);
+          const renderData = toolRenderData(item.name, raw);
+          if (renderData.read && item.id) readCalls.add(item.id);
           msgs.push({ role: 'tool_use', ts, toolName: item.name || '?', callId: item.id || null,
-            input, ...toolRenderData(item.name, raw), text: (item.name || '?') + ' ' + input });
+            input, ...renderData, text: (item.name || '?') + ' ' + input });
         }
       }
     } else if (m.role === 'toolResult') {
-      const output = truncate(extractText(m.content), 600);
+      const rawOutput = extractText(m.content);
+      const isRead = isReadToolName(m.toolName) || readCalls.has(m.toolCallId);
+      const output = isRead ? rawOutput : truncate(rawOutput, 600);
       msgs.push({ role: 'tool_result', ts, toolName: m.toolName || '?', callId: m.toolCallId || null,
-        output, text: output });
+        output, text: output, ...(isRead ? { readContent: rawOutput } : {}) });
     }
   }
   return msgs;

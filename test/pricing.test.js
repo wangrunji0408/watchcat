@@ -303,6 +303,28 @@ test('preserves Bash commands and Write content for specialized rendering', () =
   });
 });
 
+test('preserves complete Read results and structured file ranges', () => {
+  const fileContent = Array.from({ length: 80 }, (_, i) => `line ${i + 1}: ${'x'.repeat(12)}`).join('\n');
+  const rows = [
+    { type: 'assistant', timestamp: '2026-07-18T00:00:00Z', message: { content: [{
+      type: 'tool_use', id: 'read-1', name: 'Read', input: {
+        file_path: '/tmp/long.txt', offset: 20, limit: 80,
+      },
+    }] } },
+    { type: 'user', timestamp: '2026-07-18T00:00:01Z', message: { content: [{
+      type: 'tool_result', tool_use_id: 'read-1', content: fileContent,
+    }] } },
+  ];
+  const detail = detailClaude('/tmp/project/main.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.deepEqual(detail[0].read, {
+    path: '/tmp/long.txt', offset: 20, limit: 80, pages: null,
+  });
+  assert.ok(fileContent.length > 600);
+  assert.equal(detail[1].output, fileContent);
+  assert.equal(detail[1].readContent, fileContent);
+});
+
 test('renders context compaction events from supported logs', () => {
   const claude = detailClaude('/tmp/project/main.jsonl', JSON.stringify({
     type: 'system', subtype: 'compact_boundary', timestamp: '2026-07-18T00:00:00Z',

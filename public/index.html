@@ -134,6 +134,12 @@
   .bash-block { margin: 0; max-width: 100%; overflow-x: auto; padding: 9px 11px; border: 1px solid var(--border);
     border-radius: 6px; background: #10131a; color: #c8d3f5; white-space: pre;
     font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; -webkit-overflow-scrolling: touch; }
+  .read-request { padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: #10131a;
+    color: #c8d3f5; white-space: pre-wrap; word-break: break-all; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .read-view { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: #10131a; }
+  .read-view-head { padding: 5px 9px; border-bottom: 1px solid var(--border); color: var(--dim); background: var(--panel2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .read-view .bash-block { border: 0; border-radius: 0; max-height: 520px; overflow: auto; }
   .msg.divider { color: var(--accent); font-size: 12px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
   .msg.compaction { display: flex; align-items: center; gap: 9px; color: var(--dim); font-size: 12px; }
   .msg.compaction::before, .msg.compaction::after { content: ''; height: 1px; background: var(--border); flex: 1; }
@@ -264,7 +270,8 @@ const MESSAGES = {
     agentFailed: 'Agent failed', agentTimeout: 'Agent timed out', agentCancelled: 'Agent cancelled', agentAborted: 'Agent aborted', agentStatus: 'Agent status',
     viewSubagent: 'View subagent log', automatic: 'automatic', manual: 'manual', beforeCompaction: '{n} tokens before compaction', compacted: 'Context compacted',
     noMessages: 'No messages to display', loadFailed: 'Failed to load: {error}', jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun',
-    jul: 'Jul', aug: 'Aug', sep: 'Sep', oct: 'Oct', nov: 'Nov', dec: 'Dec', mon: 'M', wed: 'W', fri: 'F'
+    jul: 'Jul', aug: 'Aug', sep: 'Sep', oct: 'Oct', nov: 'Nov', dec: 'Dec', mon: 'M', wed: 'W', fri: 'F',
+    offset: 'offset', limit: 'limit', pages: 'pages'
   },
   zh: {
     pageTitle: 'Watchcat · Agent 会话监控', stats: '📊 统计', running: '运行中', open: '存活', idle: '空闲',
@@ -285,7 +292,8 @@ const MESSAGES = {
     agentFailed: 'Agent 失败', agentTimeout: 'Agent 超时', agentCancelled: 'Agent 已取消', agentAborted: 'Agent 已中止', agentStatus: 'Agent 状态',
     viewSubagent: '点击查看 subagent 记录', automatic: '自动', manual: '手动', beforeCompaction: '压缩前 {n} tokens', compacted: '上下文已压缩',
     noMessages: '没有可显示的消息', loadFailed: '加载失败：{error}', jan: '1月', feb: '2月', mar: '3月', apr: '4月', may: '5月', jun: '6月',
-    jul: '7月', aug: '8月', sep: '9月', oct: '10月', nov: '11月', dec: '12月', mon: '一', wed: '三', fri: '五'
+    jul: '7月', aug: '8月', sep: '9月', oct: '10月', nov: '11月', dec: '12月', mon: '一', wed: '三', fri: '五',
+    offset: '起始行', limit: '行数', pages: '页码'
   },
 };
 let language = localStorage.getItem('watchcat-language') || (navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en');
@@ -553,6 +561,25 @@ function renderBash(text) {
   return pre;
 }
 
+function readLabel(read) {
+  const parts = [read.path || 'Read'];
+  if (Number.isFinite(read.offset)) parts.push(t('offset') + ' ' + read.offset);
+  if (Number.isFinite(read.limit)) parts.push(t('limit') + ' ' + read.limit);
+  if (read.pages) parts.push(t('pages') + ' ' + read.pages);
+  return parts.join(' · ');
+}
+
+function renderReadRequest(read) {
+  return el('div', 'read-request', readLabel(read));
+}
+
+function renderReadContent(read, content) {
+  const view = el('div', 'read-view');
+  view.appendChild(el('div', 'read-view-head', readLabel(read)));
+  view.appendChild(renderBash(content));
+  return view;
+}
+
 function renderActivity(messages, start, sessionFile) {
   const key = sessionFile + ':activity:' + start;
   const activity = expandable('details', 'activity', key);
@@ -608,14 +635,18 @@ function renderActivity(messages, start, sessionFile) {
           ? renderWriteDiff(call.use.write)
           : call.use.bash
             ? renderBash(call.use.bash.command)
+            : call.use.read
+              ? renderReadRequest(call.use.read)
         : el('div', 'tool-detail-value', call.use.input || call.use.text));
     }
     detail.appendChild(el('div', 'tool-detail-label', t('toolResult')));
     const resultText = call.results.length
-      ? call.results.map(r => r.output || r.text).join('\n') : t('noResult');
+      ? call.results.map(r => r.readContent ?? r.output ?? r.text ?? '').join('\n') : t('noResult');
     detail.appendChild(call.use && call.use.bash
       ? renderBash(resultText)
-      : el('div', 'tool-detail-value', resultText));
+      : call.use && call.use.read
+        ? renderReadContent(call.use.read, resultText)
+        : el('div', 'tool-detail-value', resultText));
     item.appendChild(detail);
     list.appendChild(item);
   });
