@@ -9,10 +9,12 @@ const {
   detailCodex,
   detailDsh,
   detailOpenClaw,
+  extractThinkingEffort,
   normalizeModelName,
   normalizedUsage,
   priceForModel,
   summarizeClaude,
+  summarizeCodex,
   summarizeDsh,
   summarizeOpenClaw,
   summarizeUsageRecords,
@@ -22,7 +24,7 @@ test('parses DeepSeek Harness summaries and message details', () => {
   const rows = [
     { type: 'session', id: 'session-1', createdAt: 1785515761653, cwd: '/tmp/dsh-project' },
     { type: 'request/header', time: 1785515762000,
-      data: { header: { config: { model: 'deepseek-v4-pro' } } } },
+      data: { header: { config: { model: 'deepseek-v4-pro', reasoningEffort: 'max' } } } },
     { type: 'user/message', time: 1785515763000,
       data: { content: [{ type: 'text', text: 'build it' }] } },
     { type: 'session/title', time: 1785515763100, data: { title: 'Build the project' } },
@@ -48,6 +50,7 @@ test('parses DeepSeek Harness summaries and message details', () => {
   assert.equal(summary.project, '/tmp/dsh-project');
   assert.equal(summary.title, 'Build the project');
   assert.equal(summary.model, 'deepseek-v4-pro');
+  assert.equal(summary.thinkingEffort, 'max');
   assert.equal(summary.turns, 2);
   assert.equal(summary.contextTokens, 300);
   assert.equal(summary.usage.cachedInputTokens, 200);
@@ -59,10 +62,31 @@ test('parses DeepSeek Harness summaries and message details', () => {
   assert.equal(detail[4].output, 'tests passed');
 });
 
+test('extracts Codex thinking effort from turn context', () => {
+  const rows = [
+    { type: 'session_meta', timestamp: '2026-07-17T00:00:00Z',
+      payload: { id: 'codex-1', cwd: '/tmp/project' } },
+    { type: 'turn_context', timestamp: '2026-07-17T00:00:01Z',
+      payload: { model: 'gpt-5.4', effort: 'high' } },
+    { type: 'event_msg', timestamp: '2026-07-17T00:00:02Z',
+      payload: { type: 'user_message', message: 'hello' } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeCodex('/tmp/session.jsonl', { size: content.length }, content);
+  assert.equal(summary.thinkingEffort, 'high');
+});
+
 test('normalizes provider and dated model aliases', () => {
   assert.equal(normalizeModelName('openai/gpt-5.6-sol'), 'gpt-5.6-sol');
   assert.equal(normalizeModelName('azure-gpt-5.4-2026-03-05'), 'gpt-5.4');
   assert.equal(priceForModel('anthropic/claude-opus-4-8').input, 5);
+});
+
+test('normalizes thinking effort from runtime-specific configurations', () => {
+  assert.equal(extractThinkingEffort({ thinkingLevel: 'low' }), 'low');
+  assert.equal(extractThinkingEffort('{"reasoning_config":{"effort":"high"}}'), 'high');
+  assert.equal(extractThinkingEffort({ reasoningEffort: 'max' }), 'max');
+  assert.equal(extractThinkingEffort({ reasoning_config: null }), null);
 });
 
 test('prices Codex uncached, cached, and output tokens separately', () => {
@@ -91,6 +115,7 @@ test('deduplicates repeated Claude log entries by message id', () => {
   const user = { type: 'user', message: { content: 'hello' }, timestamp: '2026-07-17T00:00:00Z' };
   const assistant = {
     type: 'assistant',
+    effort: 'xhigh',
     timestamp: '2026-07-17T00:00:01Z',
     message: {
       id: 'msg-1',
@@ -103,6 +128,7 @@ test('deduplicates repeated Claude log entries by message id', () => {
     [user, assistant, { ...assistant, uuid: 'duplicate-row' }].map(JSON.stringify).join('\n'));
 
   assert.equal(summary.model, 'claude-fable-5');
+  assert.equal(summary.thinkingEffort, 'xhigh');
   assert.equal(summary.usage.requests, 1);
   assert.equal(summary.usage.totalTokens, 310);
   assert.equal(summary.cost.usd, 0.0017);
@@ -182,12 +208,13 @@ test('parses OpenClaw messages, tools, usage, and subagent metadata', () => {
   const raw = summarizeOpenClaw(file, { size: content.length }, content);
   const summary = decorateOpenClawSummary(raw, {
     agentId: 'main', sessionKey: 'agent:main:subagent:child-1', label: 'worker',
-    parentSessionKey: 'agent:main:main', parentSessionId: 'parent-1', status: 'done',
+    parentSessionKey: 'agent:main:main', parentSessionId: 'parent-1', status: 'done', thinkingLevel: 'low',
   });
 
   assert.equal(summary.project, '/tmp/project');
   assert.equal(summary.title, 'worker');
   assert.equal(summary.sessionKind, 'subagent');
+  assert.equal(summary.thinkingEffort, 'low');
   assert.equal(summary.parentSessionId, 'parent-1');
   assert.equal(summary.turns, 3);
   assert.equal(summary.usage.inputTokens, 21);

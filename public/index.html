@@ -1202,6 +1202,7 @@ async function openSession(s, keepScroll) {
     const metrics = [];
     if (s.id) metrics.push('Session ID ' + s.id);
     if (s.model) metrics.push('模型 ' + s.model + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));
+    if (s.thinkingEffort) metrics.push('思考强度 ' + s.thinkingEffort);
     if (s.contextTokens != null) metrics.push(fmtK(s.contextTokens) + ' ctx');
     if (s.usage) metrics.push(costText(s.cost));
     const metricsNode = el('div', 'detail-metrics', metrics.join(' · '));

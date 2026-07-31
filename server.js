@@ -308,6 +308,20 @@ function isoTime(value) {
   return isNaN(date) ? null : date.toISOString();
 }
 
+function extractThinkingEffort(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try { return extractThinkingEffort(JSON.parse(trimmed)); } catch { return trimmed; }
+  }
+  if (typeof value !== 'object') return null;
+  const effort = value.thinkingEffort ?? value.thinking_level ?? value.thinkingLevel ??
+    value.reasoningEffort ?? value.reasoning_effort ?? value.effort ?? value.level;
+  if (effort != null) return extractThinkingEffort(effort);
+  return extractThinkingEffort(value.reasoning_config ?? value.reasoningConfig);
+}
+
 function isNoiseUserText(text) {
   return /^\s*(<system-reminder>|<local-command|<command-name|<bash-(input|stdout|stderr)|Caveat:)/.test(text);
 }
@@ -344,6 +358,7 @@ function summarizeClaude(file, stat, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const isSubagent = path.basename(path.dirname(file)) === 'subagents';
   let cwd = null, firstUserText = null, summaryTitle = null, gitBranch = null, version = null, model = null;
+  let thinkingEffort = null;
   let firstTs = null, lastTs = null, userCount = 0, assistantCount = 0, lastEventText = null;
   let sessionId = path.basename(file, '.jsonl');
   let agentId = isSubagent ? path.basename(file, '.jsonl').replace(/^agent-/, '') : null;
@@ -358,6 +373,7 @@ function summarizeClaude(file, stat, content) {
     if (l.cwd && !cwd) cwd = l.cwd;
     if (l.gitBranch) gitBranch = l.gitBranch;
     if (l.version) version = l.version;
+    if (l.effort) thinkingEffort = l.effort;
     if (isSubagent) {
       agentId = l.agentId || agentId;
       parentSessionId = l.sessionId || parentSessionId;
@@ -413,6 +429,7 @@ function summarizeClaude(file, stat, content) {
     gitBranch, version,
     model,
     models: [...models],
+    thinkingEffort,
     contextTokens,
     usage: totals.usage,
     cost: totals.cost,
@@ -505,6 +522,7 @@ function decorateClaudeSubagentSummary(summary) {
 function summarizeCodex(file, stat, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   let cwd = null, sessionId = path.basename(file, '.jsonl'), source = null, model = null;
+  let thinkingEffort = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
   let userCount = 0, agentCount = 0, contextTokens = null;
   const models = new Set();
@@ -519,7 +537,12 @@ function summarizeCodex(file, stat, content) {
       sessionId = p.session_id || p.id || sessionId;
       source = p.originator || p.source || source;
     }
-    if (l.type === 'turn_context' && p.model) { model = p.model; models.add(model); }
+    if (l.type === 'turn_context') {
+      if (p.model) { model = p.model; models.add(model); }
+      thinkingEffort = p.effort || p.reasoning_effort ||
+        p.collaboration_mode && p.collaboration_mode.settings && p.collaboration_mode.settings.reasoning_effort ||
+        thinkingEffort;
+    }
     if (l.type === 'event_msg') {
       if (p.type === 'user_message' && p.message) {
         userCount++;
@@ -556,6 +579,7 @@ function summarizeCodex(file, stat, content) {
     version: source,
     model,
     models: [...models],
+    thinkingEffort,
     contextTokens,
     usage: totals.usage,
     cost: totals.cost,
@@ -567,6 +591,7 @@ function summarizeCodex(file, stat, content) {
 function summarizeDsh(file, stat, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   let cwd = null, sessionId = path.basename(path.dirname(file)), title = null, model = null;
+  let thinkingEffort = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
   let userCount = 0, agentCount = 0, contextTokens = null;
   const models = new Set();
@@ -585,6 +610,7 @@ function summarizeDsh(file, stat, content) {
     } else if (l.type === 'request/header') {
       const config = d.header && d.header.config || {};
       if (config.model) { model = config.model; models.add(model); }
+      thinkingEffort = config.reasoningEffort || config.reasoning_effort || thinkingEffort;
     } else if (l.type === 'user/message') {
       const text = extractText(d.content);
       if (text && !isNoiseUserText(text)) {
@@ -629,6 +655,7 @@ function summarizeDsh(file, stat, content) {
     version: 'DeepSeek Harness',
     model,
     models: [...models],
+    thinkingEffort,
     contextTokens,
     usage: totals.usage,
     cost: totals.cost,
@@ -642,6 +669,7 @@ function summarizeOpenClaw(file, stat, content) {
   let cwd = null, sessionId = path.basename(file, '.jsonl'), provider = null, model = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
   let userCount = 0, agentCount = 0, contextTokens = null;
+  let thinkingEffort = null;
   const models = new Set();
   const usageRecords = [];
   const activityByDay = new Map();
@@ -651,13 +679,16 @@ function summarizeOpenClaw(file, stat, content) {
     if (l.type === 'session') {
       cwd = l.cwd || cwd;
       sessionId = l.id || sessionId;
+      thinkingEffort = extractThinkingEffort(l) || thinkingEffort;
     }
     if (l.type === 'model_change') {
       provider = l.provider || provider;
       if (l.modelId) { model = l.modelId; models.add(model); }
+      thinkingEffort = extractThinkingEffort(l) || thinkingEffort;
     }
     if (l.type !== 'message' || !l.message) continue;
     const m = l.message;
+    thinkingEffort = extractThinkingEffort(m) || thinkingEffort;
     const ts = l.timestamp || (m.timestamp ? new Date(m.timestamp).toISOString() : null);
     const text = extractText(m.content);
     if (m.role === 'user' && text && !isNoiseUserText(text)) {
@@ -708,6 +739,7 @@ function summarizeOpenClaw(file, stat, content) {
     version: agentId || provider,
     model,
     models: [...models],
+    thinkingEffort,
     contextTokens,
     usage: totals.usage,
     cost: totals.cost,
@@ -1151,6 +1183,7 @@ function decorateOpenClawSummary(summary, metadata = {}) {
     title,
     model: summary.model || metadata.model || null,
     models: summary.models.length ? summary.models : (metadata.model ? [metadata.model] : []),
+    thinkingEffort: extractThinkingEffort(metadata) || summary.thinkingEffort || null,
     version: metadata.agentId || summary.version,
     agentId: metadata.agentId || null,
     sessionKey: metadata.sessionKey || null,
@@ -1214,7 +1247,8 @@ function hermesSessions() {
   if (!db) return [];
   if (Date.now() - hermesCache.at < 3000) return hermesCache.sessions;
   const rows = db.prepare(`
-    SELECT s.id, s.source, s.title, s.cwd, s.git_branch, s.started_at, s.ended_at, s.message_count,
+    SELECT s.id, s.source, s.title, s.cwd, s.git_branch, s.model_config,
+      s.started_at, s.ended_at, s.message_count,
       (SELECT m.content FROM messages m WHERE m.session_id = s.id AND m.role = 'user'
          AND m.content IS NOT NULL AND m.content NOT LIKE '[IMPORTANT:%' ORDER BY m.timestamp LIMIT 1) AS first_user,
       (SELECT m.content FROM messages m WHERE m.session_id = s.id AND m.role = 'assistant'
@@ -1285,6 +1319,7 @@ function hermesSessions() {
       version: r.source,
       model: modelRows.length ? modelRows[modelRows.length - 1].model : null,
       models: [...new Set(modelRows.map(u => u.model).filter(Boolean))],
+      thinkingEffort: extractThinkingEffort(r.model_config),
       // messages 表无逐条 token,用累计用量 / 调用次数估算单次请求的平均 context
       contextTokens: r.api_calls > 0 ? Math.round(Number(r.ctx_in || 0) / Number(r.api_calls)) : null,
       usage: totals.usage,
@@ -1588,6 +1623,7 @@ function subagentLink(summary) {
     turns: summary.turns,
     model: summary.model,
     models: summary.models,
+    thinkingEffort: summary.thinkingEffort || null,
     contextTokens: summary.contextTokens,
     usage: summary.usage,
     cost: summary.cost,
@@ -1901,6 +1937,7 @@ module.exports = {
   detailDsh,
   detailOpenClaw,
   discoverRemoteHosts,
+  extractThinkingEffort,
   normalizeModelName,
   normalizedUsage,
   parseRemoteScan,
