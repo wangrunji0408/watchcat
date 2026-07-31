@@ -7,12 +7,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 
 const PORT = parseInt(process.env.PORT || '3789', 10);
 const HOME = os.homedir();
 const CLAUDE_DIR = path.join(HOME, '.claude', 'projects');
 const CODEX_DIR = path.join(HOME, '.codex', 'sessions');
+const DSH_DIR = path.join(HOME, '.dsh', 'sessions');
 const OPENCLAW_DIR = path.resolve(process.env.OPENCLAW_STATE_DIR || path.join(HOME, '.openclaw'));
 const OPENCLAW_AGENTS_DIR = path.join(OPENCLAW_DIR, 'agents');
 const HERMES_DB = path.join(HOME, '.hermes', 'state.db');
@@ -257,12 +258,12 @@ let openFilesCache = { at: 0, files: new Set() };
 function getOpenJsonlFiles() {
   return new Promise((resolve) => {
     if (Date.now() - openFilesCache.at < 3000) return resolve(openFilesCache.files);
-    execFile('lsof', ['-F', 'n', '-c', 'claude', '-c', 'codex', '-c', 'openclaw', '-c', 'node'],
+    execFile('lsof', ['-F', 'n', '-c', 'claude', '-c', 'codex', '-c', 'dsh', '-c', 'openclaw', '-c', 'node'],
       { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
         const files = new Set();
         if (stdout) {
           for (const line of stdout.split('\n')) {
-            if (line.startsWith('n') && line.endsWith('.jsonl')) files.add(line.slice(1));
+          if (line.startsWith('n') && (line.endsWith('.jsonl') || line.endsWith('.jsonl.zstd'))) files.add(line.slice(1));
           }
         }
         openFilesCache = { at: Date.now(), files };
@@ -285,7 +286,26 @@ function parseJsonLines(content) {
 }
 
 function parseLines(file) {
-  return parseJsonLines(fs.readFileSync(file, 'utf8'));
+  return parseJsonLines(readSessionContent(file));
+}
+
+function readSessionContent(file) {
+  if (!file.endsWith('.zstd')) return fs.readFileSync(file, 'utf8');
+  try {
+    return execFileSync('zstd', ['-dc', '--', file], {
+      encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch (e) {
+    // DSH 会边运行边追加 zstd frame；写入瞬间末帧可能不完整，但此前 stdout 仍然有效。
+    if (e.stdout && e.stdout.length) return Buffer.isBuffer(e.stdout) ? e.stdout.toString('utf8') : e.stdout;
+    throw e;
+  }
+}
+
+function isoTime(value) {
+  if (value == null) return null;
+  const date = new Date(value);
+  return isNaN(date) ? null : date.toISOString();
 }
 
 function isNoiseUserText(text) {
@@ -534,6 +554,79 @@ function summarizeCodex(file, stat, content) {
     turns: userCount + agentCount,
     gitBranch: null,
     version: source,
+    model,
+    models: [...models],
+    contextTokens,
+    usage: totals.usage,
+    cost: totals.cost,
+    sizeBytes: stat.size,
+  };
+}
+
+// DeepSeek Harness 会话摘要（~/.dsh/sessions/**/session.jsonl.zstd）
+function summarizeDsh(file, stat, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  let cwd = null, sessionId = path.basename(path.dirname(file)), title = null, model = null;
+  let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
+  let userCount = 0, agentCount = 0, contextTokens = null;
+  const models = new Set();
+  const usageRecords = [];
+  const activityByDay = new Map();
+
+  for (const l of lines) {
+    const ts = isoTime(l.time ?? l.createdAt);
+    if (ts) { if (!firstTs) firstTs = ts; lastTs = ts; }
+    const d = l.data || {};
+    if (l.type === 'session') {
+      cwd = l.cwd || cwd;
+      sessionId = l.id || sessionId;
+    } else if (l.type === 'session/title' && d.title) {
+      title = d.title;
+    } else if (l.type === 'request/header') {
+      const config = d.header && d.header.config || {};
+      if (config.model) { model = config.model; models.add(model); }
+    } else if (l.type === 'user/message') {
+      const text = extractText(d.content);
+      if (text && !isNoiseUserText(text)) {
+        userCount++;
+        if (!firstUserText) firstUserText = text;
+        bumpDate(activityByDay, ts);
+      }
+    } else if (l.type === 'assistant/message' && d.message) {
+      const messageModel = d.message.source && d.message.source.model;
+      if (messageModel) { model = messageModel; models.add(model); }
+      const text = extractText(d.message.content);
+      if (text) { agentCount++; lastAgentText = text; bumpDate(activityByDay, ts); }
+      if (d.usage) {
+        contextTokens = Number(d.usage.inputTokens || 0) + Number(d.usage.cacheReadTokens || 0);
+        usageRecords.push({
+          model,
+          usage: normalizedUsage({
+            input_tokens: d.usage.inputTokens,
+            output_tokens: d.usage.outputTokens,
+            cache_read_input_tokens: d.usage.cacheReadTokens,
+            reasoning_tokens: d.usage.reasoningTokens,
+          }, 'dsh'),
+          ts,
+        });
+      }
+    }
+  }
+  if (!firstUserText && !agentCount) return null;
+  const totals = summarizeUsageRecords(usageRecords);
+  return {
+    source: 'dsh',
+    daily: summarizeDailyRecords(usageRecords),
+    activity: activityFromMap(activityByDay),
+    id: sessionId,
+    file,
+    project: cwd || '(未知项目)',
+    title: truncate(title || firstUserText || '(无标题)', 80),
+    lastMessage: truncate(lastAgentText || '', 120),
+    firstTs, lastTs,
+    turns: userCount + agentCount,
+    gitBranch: null,
+    version: 'DeepSeek Harness',
     model,
     models: [...models],
     contextTokens,
@@ -1082,6 +1175,7 @@ function getSummary(file, kind) {
   let summary = null;
   try {
     if (kind === 'claude') summary = summarizeClaude(file, stat);
+    else if (kind === 'dsh') summary = summarizeDsh(file, stat);
     else if (kind === 'openclaw') summary = summarizeOpenClaw(file, stat);
     else summary = summarizeCodex(file, stat);
   } catch (e) {
@@ -1392,6 +1486,48 @@ function detailCodex(file, content) {
   return msgs;
 }
 
+function dshToolResultText(message) {
+  const parts = [];
+  for (const outer of message && Array.isArray(message.content) ? message.content : []) {
+    if (outer.type !== 'tool-result') continue;
+    for (const inner of Array.isArray(outer.content) ? outer.content : []) {
+      if (inner.type === 'text' && inner.text) parts.push(inner.text);
+    }
+  }
+  return parts.join('\n');
+}
+
+function detailDsh(file, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  const msgs = [];
+  for (const l of lines) {
+    const d = l.data || {};
+    const ts = isoTime(l.time ?? l.createdAt);
+    if (l.type === 'user/message') {
+      const value = extractText(d.content);
+      if (value && !isNoiseUserText(value)) msgs.push({ role: 'user', text: value, ts });
+    } else if (l.type === 'assistant/message' && d.message) {
+      for (const item of Array.isArray(d.message.content) ? d.message.content : []) {
+        if (item.type === 'text' && item.text) {
+          msgs.push({ role: 'assistant', text: item.text, ts });
+        } else if (item.type === 'reasoning' && item.text) {
+          msgs.push({ role: 'thinking', text: truncate(item.text, 600), ts });
+        }
+      }
+    } else if (l.type === 'tool/call') {
+      const raw = d.arguments ?? '';
+      const input = truncate(typeof raw === 'string' ? raw : JSON.stringify(raw), 400);
+      msgs.push({ role: 'tool_use', ts, toolName: d.name || '?', callId: d.callId || null,
+        input, ...toolRenderData(d.name, raw), text: (d.name || '?') + ' ' + input });
+    } else if (l.type === 'tool/result') {
+      const output = truncate(dshToolResultText(d.message), 600);
+      const callId = d.callId || d.message && d.message.source && d.message.source.callId || null;
+      msgs.push({ role: 'tool_result', ts, callId, output, text: output });
+    }
+  }
+  return msgs;
+}
+
 function detailOpenClaw(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
@@ -1513,6 +1649,7 @@ function attachSubagentEvents(messages, parentFile) {
 async function collectSessions() {
   const claudeFiles = listClaudeSessionFiles();
   const codexFiles = listFilesRecursive(CODEX_DIR, '.jsonl');
+  const dshFiles = listFilesRecursive(DSH_DIR, '.jsonl.zstd');
   const openClawEntries = listOpenClawSessionEntries();
   const openFiles = await getOpenJsonlFiles();
   const now = Date.now();
@@ -1524,6 +1661,10 @@ async function collectSessions() {
   }
   for (const f of codexFiles) {
     const s = getSummary(f, 'codex');
+    if (s) sessions.push(s);
+  }
+  for (const f of dshFiles) {
+    const s = getSummary(f, 'dsh');
     if (s) sessions.push(s);
   }
   for (const { file, metadata } of openClawEntries) {
@@ -1678,11 +1819,14 @@ function apiSessionDetail(query) {
   const resolved = path.resolve(file);
   const inClaude = resolved.startsWith(CLAUDE_DIR + path.sep);
   const inCodex = resolved.startsWith(CODEX_DIR + path.sep);
+  const inDsh = resolved.startsWith(DSH_DIR + path.sep);
   const inOpenClaw = resolved.startsWith(OPENCLAW_AGENTS_DIR + path.sep);
-  if ((!inClaude && !inCodex && !inOpenClaw) || !resolved.endsWith('.jsonl')) throw httpError(403, 'forbidden path');
+  if ((!inClaude && !inCodex && !inDsh && !inOpenClaw) ||
+      (!resolved.endsWith('.jsonl') && !resolved.endsWith('.jsonl.zstd'))) throw httpError(403, 'forbidden path');
   if (!fs.existsSync(resolved)) throw httpError(404, 'not found');
-  const source = inClaude ? 'claude' : inCodex ? 'codex' : 'openclaw';
-  let messages = inClaude ? detailClaude(resolved) : inCodex ? detailCodex(resolved) : detailOpenClaw(resolved);
+  const source = inClaude ? 'claude' : inCodex ? 'codex' : inDsh ? 'dsh' : 'openclaw';
+  let messages = inClaude ? detailClaude(resolved) : inCodex ? detailCodex(resolved) :
+    inDsh ? detailDsh(resolved) : detailOpenClaw(resolved);
   messages = attachSubagentEvents(messages, resolved);
   return { file: resolved, source, messages };
 }
@@ -1754,6 +1898,7 @@ module.exports = {
   summarizeDailyRecords,
   detailClaude,
   detailCodex,
+  detailDsh,
   detailOpenClaw,
   discoverRemoteHosts,
   normalizeModelName,
@@ -1763,6 +1908,7 @@ module.exports = {
   remoteAgentSessions,
   summarizeClaude,
   summarizeCodex,
+  summarizeDsh,
   summarizeOpenClaw,
   decorateOpenClawSummary,
   summarizeUsageRecords,

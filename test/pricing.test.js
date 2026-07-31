@@ -7,14 +7,57 @@ const {
   decorateOpenClawSummary,
   detailClaude,
   detailCodex,
+  detailDsh,
   detailOpenClaw,
   normalizeModelName,
   normalizedUsage,
   priceForModel,
   summarizeClaude,
+  summarizeDsh,
   summarizeOpenClaw,
   summarizeUsageRecords,
 } = require('../server');
+
+test('parses DeepSeek Harness summaries and message details', () => {
+  const rows = [
+    { type: 'session', id: 'session-1', createdAt: 1785515761653, cwd: '/tmp/dsh-project' },
+    { type: 'request/header', time: 1785515762000,
+      data: { header: { config: { model: 'deepseek-v4-pro' } } } },
+    { type: 'user/message', time: 1785515763000,
+      data: { content: [{ type: 'text', text: 'build it' }] } },
+    { type: 'session/title', time: 1785515763100, data: { title: 'Build the project' } },
+    { type: 'assistant/message', time: 1785515764000, data: {
+      message: { source: { model: 'deepseek-v4-pro' }, content: [
+        { type: 'reasoning', text: 'inspect first' }, { type: 'text', text: 'working' },
+      ] },
+      usage: { inputTokens: 100, cacheReadTokens: 200, outputTokens: 50, reasoningTokens: 20 },
+    } },
+    { type: 'tool/call', time: 1785515765000,
+      data: { callId: 'call-1', name: 'bash', arguments: '{"command":"npm test"}' } },
+    { type: 'tool/result', time: 1785515766000, data: { message: {
+      source: { kind: 'tool', callId: 'call-1' }, content: [{
+      type: 'tool-result', content: [{ type: 'text', text: 'tests passed' }],
+    }] } } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const file = '/tmp/project/session-1/session.jsonl.zstd';
+  const summary = summarizeDsh(file, { size: content.length }, content);
+
+  assert.equal(summary.source, 'dsh');
+  assert.equal(summary.id, 'session-1');
+  assert.equal(summary.project, '/tmp/dsh-project');
+  assert.equal(summary.title, 'Build the project');
+  assert.equal(summary.model, 'deepseek-v4-pro');
+  assert.equal(summary.turns, 2);
+  assert.equal(summary.contextTokens, 300);
+  assert.equal(summary.usage.cachedInputTokens, 200);
+
+  const detail = detailDsh(file, content);
+  assert.deepEqual(detail.map(m => m.role), ['user', 'thinking', 'assistant', 'tool_use', 'tool_result']);
+  assert.deepEqual(detail[3].bash, { command: 'npm test' });
+  assert.equal(detail[4].callId, 'call-1');
+  assert.equal(detail[4].output, 'tests passed');
+});
 
 test('normalizes provider and dated model aliases', () => {
   assert.equal(normalizeModelName('openai/gpt-5.6-sol'), 'gpt-5.6-sol');

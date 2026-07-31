@@ -274,6 +274,11 @@ const LOGOS = {
     }
     return '<svg class="logo" viewBox="0 0 24 24" fill="#e8e8ec">' + petals + '</svg>';
   })(),
+  // DeepSeek Harness: 蓝色鲸鱼
+  dsh: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#4f8cff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M3 13c1.2 4.2 4.3 6.5 8.5 6.5 4.5 0 7.5-2.4 8.5-6.5-2.2.8-4 .6-5.4-.4-1.8-1.3-3.8-1.3-5.6 0-1.6 1.1-3.6 1.3-6 .4z"/>' +
+    '<path d="M18.5 12c.2-2 1.2-3.4 2.8-4.2.2 2.3-.7 4-2.8 5.2M6.5 12V8.5M10 11V7M13.5 11.5V8.5"/>' +
+    '<circle cx="15.7" cy="14.2" r=".7" fill="#4f8cff" stroke="none"/></svg>',
   // OpenClaw: 橙色蟹钳
   openclaw: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#f28c57" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="M8.5 9.5C5 8.8 3.3 6.5 4.2 4.2c2.6.2 4.5 1.7 5.3 4.3M15.5 9.5c3.5-.7 5.2-3 4.3-5.3-2.6.2-4.5 1.7-5.3 4.3"/>' +
@@ -285,7 +290,7 @@ const LOGOS = {
     '<path d="M19.5 12.5 C16.5 12.5 13.5 14.5 12.5 16.5"/>' +
     '<path d="M4 16.5 H14"/></svg>',
 };
-const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', openclaw: 'OpenClaw', hermes: 'Hermes' };
+const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', dsh: 'DeepSeek Harness', openclaw: 'OpenClaw', hermes: 'Hermes' };
 
 function fmtTime(ts) {
   if (!ts) return '';
