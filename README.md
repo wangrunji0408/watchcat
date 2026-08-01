@@ -4,6 +4,8 @@
 
 A local Agent session monitor accessible from your LAN.
 
+Supported sources include Claude Code, Codex, DeepSeek Harness, Cetus, OpenClaw, and Hermes. Cetus sessions are discovered from `~/Library/Application Support/dev.cetus.app/sessions`.
+
 ## Run
 
 Requires Node.js 18 or later.

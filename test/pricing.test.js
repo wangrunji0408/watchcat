@@ -7,6 +7,7 @@ const {
   decorateOpenClawSummary,
   detailClaude,
   detailCodex,
+  detailCetus,
   detailDsh,
   detailHermesRows,
   detailOpenClaw,
@@ -18,6 +19,7 @@ const {
   priceForModel,
   summarizeClaude,
   summarizeCodex,
+  summarizeCetus,
   summarizeDsh,
   summarizeOpenClaw,
   summarizeUsageRecords,
@@ -371,6 +373,51 @@ test('parses OpenClaw messages, tools, usage, and subagent metadata', () => {
   assert.deepEqual(detail.map(m => m.role), ['user', 'thinking', 'tool_use', 'tool_result', 'assistant']);
   assert.equal(detail[2].callId, 'call-1');
   assert.equal(detail[3].output, 'contents');
+});
+
+test('parses Cetus sessions with the compatible event format', () => {
+  const file = path.join(os.homedir(), 'Library', 'Application Support', 'dev.cetus.app', 'sessions', 'session.jsonl');
+  const rows = [
+    { type: 'session', id: 'cetus-1', timestamp: '2026-08-01T00:00:00Z', cwd: '/tmp/cetus-project' },
+    { type: 'model_change', timestamp: '2026-08-01T00:00:01Z', provider: 'openai', modelId: 'gpt-5.4' },
+    { type: 'message', timestamp: '2026-08-01T00:00:02Z', message: { role: 'user', content: 'ship it' } },
+    { type: 'message', timestamp: '2026-08-01T00:00:03Z', message: {
+      role: 'assistant', model: 'gpt-5.4', content: [{ type: 'text', text: 'done' }],
+      usage: { input: 10, output: 2, cacheRead: 3, totalTokens: 15 },
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeCetus(file, { size: content.length }, content);
+
+  assert.equal(summary.source, 'cetus');
+  assert.equal(summary.id, 'cetus-1');
+  assert.equal(summary.project, '/tmp/cetus-project');
+  assert.equal(summary.version, 'Cetus');
+  assert.equal(summary.usage.totalTokens, 15);
+  assert.deepEqual(detailCetus(file, content).map(message => message.role), ['user', 'assistant']);
+});
+
+test('preserves Cetus multi-edit arguments for diff rendering', () => {
+  const row = {
+    type: 'message', timestamp: '2026-08-01T00:00:00Z', message: { role: 'assistant', content: [{
+      type: 'toolCall', id: 'edit-1', name: 'edit', arguments: {
+        path: '/tmp/example.js', edits: [
+          { oldText: 'const first = 1;', newText: 'const first = 2;' },
+          { oldText: 'const second = 1;', newText: 'const second = 2;' },
+        ],
+      },
+    }] },
+  };
+  const [message] = detailCetus('/tmp/cetus.jsonl', JSON.stringify(row));
+
+  assert.deepEqual(message.edit, {
+    path: '/tmp/example.js',
+    edits: [
+      { oldText: 'const first = 1;', newText: 'const first = 2;' },
+      { oldText: 'const second = 1;', newText: 'const second = 2;' },
+    ],
+    replaceAll: false,
+  });
 });
 
 test('parses Claude Code sidechain rows when they are in a subagent transcript', () => {

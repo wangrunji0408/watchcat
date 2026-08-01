@@ -4,6 +4,8 @@
 
 一个可通过局域网访问的本机 Agent 会话监控面板。
 
+支持 Claude Code、Codex、DeepSeek Harness、Cetus、OpenClaw 和 Hermes。Cetus 会话会从 `~/Library/Application Support/dev.cetus.app/sessions` 自动发现。
+
 ## 运行
 
 需要 Node.js 18 或更高版本。

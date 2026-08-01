@@ -10,7 +10,7 @@
     --bg: #0f1117; --panel: #171a23; --panel2: #1e2230; --border: #2a2f3f;
     --text: #d8dce8; --dim: #8a91a5; --accent: #7aa2f7;
     --green: #9ece6a; --yellow: #e0af68; --gray: #565f89;
-    --claude: #d97757; --codex: #e8e8ec; --openclaw: #f28c57; --hermes: #bb9af7;
+    --claude: #d97757; --codex: #e8e8ec; --cetus: #56b6c2; --openclaw: #f28c57; --hermes: #bb9af7;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; }
@@ -126,6 +126,8 @@
     font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .edit-diff-head { position: sticky; left: 0; padding: 5px 9px; border-bottom: 1px solid var(--border);
     color: var(--dim); background: var(--panel2); white-space: nowrap; }
+  .edit-diff-change { padding: 3px 9px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    color: var(--dim); background: #151924; font-family: var(--sans); font-size: 11px; }
   .edit-diff-line { display: flex; min-width: max-content; white-space: pre; }
   .edit-diff-mark { width: 24px; padding-left: 8px; flex: 0 0 24px; user-select: none; color: var(--dim); }
   .edit-diff-text { padding-right: 10px; }
@@ -363,6 +365,10 @@ const LOGOS = {
     '<path d="M3 13c1.2 4.2 4.3 6.5 8.5 6.5 4.5 0 7.5-2.4 8.5-6.5-2.2.8-4 .6-5.4-.4-1.8-1.3-3.8-1.3-5.6 0-1.6 1.1-3.6 1.3-6 .4z"/>' +
     '<path d="M18.5 12c.2-2 1.2-3.4 2.8-4.2.2 2.3-.7 4-2.8 5.2M6.5 12V8.5M10 11V7M13.5 11.5V8.5"/>' +
     '<circle cx="15.7" cy="14.2" r=".7" fill="#4f8cff" stroke="none"/></svg>',
+  // Cetus: 青色鲸尾
+  cetus: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#56b6c2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M4 7c3.5 0 6 2 8 6 2-4 4.5-6 8-6-1 4.5-3.7 7.2-8 8.5C7.7 14.2 5 11.5 4 7z"/>' +
+    '<path d="M12 15.5V20"/></svg>',
   // OpenClaw: 橙色蟹钳
   openclaw: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#f28c57" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="M8.5 9.5C5 8.8 3.3 6.5 4.2 4.2c2.6.2 4.5 1.7 5.3 4.3M15.5 9.5c3.5-.7 5.2-3 4.3-5.3-2.6.2-4.5 1.7-5.3 4.3"/>' +
@@ -374,7 +380,7 @@ const LOGOS = {
     '<path d="M19.5 12.5 C16.5 12.5 13.5 14.5 12.5 16.5"/>' +
     '<path d="M4 16.5 H14"/></svg>',
 };
-const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', dsh: 'DeepSeek Harness', openclaw: 'OpenClaw', hermes: 'Hermes' };
+const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', dsh: 'DeepSeek Harness', cetus: 'Cetus', openclaw: 'OpenClaw', hermes: 'Hermes' };
 
 function fmtTime(ts) {
   if (!ts) return '';
@@ -543,15 +549,10 @@ function isDuplicatePatchResult(use, resultText) {
 
 function renderEditDiff(edit) {
   const diff = el('div', 'edit-diff');
-  const title = (edit.path || 'Edit') + (edit.replaceAll ? ' · replace all' : '');
+  const changes = Array.isArray(edit.edits) ? edit.edits : [edit];
+  const title = (edit.path || 'Edit') + (edit.replaceAll ? ' · replace all' : '') +
+    (changes.length > 1 ? ' · ×' + changes.length : '');
   diff.appendChild(el('div', 'edit-diff-head', title));
-  const oldLines = String(edit.oldText).split('\n');
-  const newLines = String(edit.newText).split('\n');
-  let prefix = 0;
-  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix++;
-  let suffix = 0;
-  while (suffix < oldLines.length - prefix && suffix < newLines.length - prefix &&
-      oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]) suffix++;
 
   const addLine = (kind, mark, text) => {
     const row = el('div', 'edit-diff-line ' + kind);
@@ -559,10 +560,21 @@ function renderEditDiff(edit) {
     row.appendChild(el('span', 'edit-diff-text', text || ' '));
     diff.appendChild(row);
   };
-  oldLines.slice(0, prefix).forEach(line => addLine('ctx', ' ', line));
-  oldLines.slice(prefix, oldLines.length - suffix).forEach(line => addLine('del', '−', line));
-  newLines.slice(prefix, newLines.length - suffix).forEach(line => addLine('add', '+', line));
-  if (suffix) oldLines.slice(oldLines.length - suffix).forEach(line => addLine('ctx', ' ', line));
+  changes.forEach((change, index) => {
+    if (changes.length > 1) diff.appendChild(el('div', 'edit-diff-change', '#' + (index + 1)));
+    const oldLines = String(change.oldText).split('\n');
+    const newLines = String(change.newText).split('\n');
+    let prefix = 0;
+    while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix++;
+    let suffix = 0;
+    while (suffix < oldLines.length - prefix && suffix < newLines.length - prefix &&
+        oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]) suffix++;
+
+    oldLines.slice(0, prefix).forEach(line => addLine('ctx', ' ', line));
+    oldLines.slice(prefix, oldLines.length - suffix).forEach(line => addLine('del', '−', line));
+    newLines.slice(prefix, newLines.length - suffix).forEach(line => addLine('add', '+', line));
+    if (suffix) oldLines.slice(oldLines.length - suffix).forEach(line => addLine('ctx', ' ', line));
+  });
   return diff;
 }
 

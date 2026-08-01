@@ -14,6 +14,7 @@ const HOME = os.homedir();
 const CLAUDE_DIR = path.join(HOME, '.claude', 'projects');
 const CODEX_DIR = path.join(HOME, '.codex', 'sessions');
 const DSH_DIR = path.join(HOME, '.dsh', 'sessions');
+const CETUS_DIR = path.join(HOME, 'Library', 'Application Support', 'dev.cetus.app', 'sessions');
 const OPENCLAW_DIR = path.resolve(process.env.OPENCLAW_STATE_DIR || path.join(HOME, '.openclaw'));
 const OPENCLAW_AGENTS_DIR = path.join(OPENCLAW_DIR, 'agents');
 const HERMES_DB = path.join(HOME, '.hermes', 'state.db');
@@ -263,7 +264,7 @@ let openFilesCache = { at: 0, files: new Set() };
 function getOpenJsonlFiles() {
   return new Promise((resolve) => {
     if (Date.now() - openFilesCache.at < 3000) return resolve(openFilesCache.files);
-    execFile('lsof', ['-F', 'n', '-c', 'claude', '-c', 'codex', '-c', 'dsh', '-c', 'openclaw', '-c', 'node'],
+    execFile('lsof', ['-F', 'n', '-c', 'claude', '-c', 'codex', '-c', 'dsh', '-c', 'Cetus', '-c', 'openclaw', '-c', 'node'],
       { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
         const files = new Set();
         if (stdout) {
@@ -777,6 +778,17 @@ function summarizeOpenClaw(file, stat, content) {
   };
 }
 
+// Cetus 使用与 OpenClaw 兼容的 JSONL 会话事件格式。
+function summarizeCetus(file, stat, content) {
+  const summary = summarizeOpenClaw(file, stat, content);
+  return summary && {
+    ...summary,
+    source: 'cetus',
+    project: summary.project.startsWith('openclaw://') ? 'cetus://unknown' : summary.project,
+    version: 'Cetus',
+  };
+}
+
 // ---------- Agent Remote SSH ----------
 
 function execFileText(command, args, options = {}) {
@@ -1240,6 +1252,7 @@ function getSummary(file, kind) {
     if (kind === 'claude') summary = summarizeClaude(file, stat);
     else if (kind === 'dsh') summary = summarizeDsh(file, stat);
     else if (kind === 'openclaw') summary = summarizeOpenClaw(file, stat);
+    else if (kind === 'cetus') summary = summarizeCetus(file, stat);
     else summary = summarizeCodex(file, stat);
   } catch (e) {
     summary = null;
@@ -1426,6 +1439,17 @@ function extractEditCall(name, raw) {
   if (!['edit', 'patch'].includes(shortToolName(name))) return null;
   const args = parseToolArgs(raw);
   if (!args) return null;
+  if (Array.isArray(args.edits)) {
+    const edits = args.edits.filter(edit => edit &&
+      typeof edit.oldText === 'string' && typeof edit.newText === 'string')
+      .map(edit => ({ oldText: edit.oldText, newText: edit.newText }));
+    if (!edits.length) return null;
+    return {
+      path: String(args.file_path ?? args.path ?? ''),
+      edits,
+      replaceAll: false,
+    };
+  }
   const oldText = args.old_string ?? args.oldText;
   const newText = args.new_string ?? args.newText;
   if (typeof oldText !== 'string' || typeof newText !== 'string') return null;
@@ -1754,6 +1778,8 @@ function detailOpenClaw(file, content) {
   return msgs;
 }
 
+const detailCetus = detailOpenClaw;
+
 let subagentSessionsByParentFile = new Map();
 
 const SUMMARY_USAGE_KEYS = [
@@ -1922,6 +1948,7 @@ async function collectSessions() {
   const claudeFiles = listClaudeSessionFiles();
   const codexFiles = listFilesRecursive(CODEX_DIR, '.jsonl');
   const dshFiles = listFilesRecursive(DSH_DIR, '.jsonl.zstd');
+  const cetusFiles = listFilesRecursive(CETUS_DIR, '.jsonl');
   const openClawEntries = listOpenClawSessionEntries();
   const openFiles = await getOpenJsonlFiles();
   const now = Date.now();
@@ -1937,6 +1964,10 @@ async function collectSessions() {
   }
   for (const f of dshFiles) {
     const s = getSummary(f, 'dsh');
+    if (s) sessions.push(s);
+  }
+  for (const f of cetusFiles) {
+    const s = getSummary(f, 'cetus');
     if (s) sessions.push(s);
   }
   for (const { file, metadata } of openClawEntries) {
@@ -2093,13 +2124,14 @@ function apiSessionDetail(query) {
   const inClaude = resolved.startsWith(CLAUDE_DIR + path.sep);
   const inCodex = resolved.startsWith(CODEX_DIR + path.sep);
   const inDsh = resolved.startsWith(DSH_DIR + path.sep);
+  const inCetus = resolved.startsWith(CETUS_DIR + path.sep);
   const inOpenClaw = resolved.startsWith(OPENCLAW_AGENTS_DIR + path.sep);
-  if ((!inClaude && !inCodex && !inDsh && !inOpenClaw) ||
+  if ((!inClaude && !inCodex && !inDsh && !inCetus && !inOpenClaw) ||
       (!resolved.endsWith('.jsonl') && !resolved.endsWith('.jsonl.zstd'))) throw httpError(403, 'forbidden path');
   if (!fs.existsSync(resolved)) throw httpError(404, 'not found');
-  const source = inClaude ? 'claude' : inCodex ? 'codex' : inDsh ? 'dsh' : 'openclaw';
+  const source = inClaude ? 'claude' : inCodex ? 'codex' : inDsh ? 'dsh' : inCetus ? 'cetus' : 'openclaw';
   let messages = inClaude ? detailClaude(resolved) : inCodex ? detailCodex(resolved) :
-    inDsh ? detailDsh(resolved) : detailOpenClaw(resolved);
+    inDsh ? detailDsh(resolved) : inCetus ? detailCetus(resolved) : detailOpenClaw(resolved);
   messages = attachSubagentEvents(messages, resolved);
   return { file: resolved, source, messages };
 }
@@ -2171,6 +2203,7 @@ module.exports = {
   summarizeDailyRecords,
   detailClaude,
   detailCodex,
+  detailCetus,
   detailDsh,
   detailHermesRows,
   detailOpenClaw,
@@ -2185,6 +2218,7 @@ module.exports = {
   remoteAgentSessions,
   summarizeClaude,
   summarizeCodex,
+  summarizeCetus,
   summarizeDsh,
   summarizeOpenClaw,
   decorateOpenClawSummary,
