@@ -362,7 +362,8 @@ function parseClaudeTaskNotification(text) {
 function summarizeClaude(file, stat, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const isSubagent = path.basename(path.dirname(file)) === 'subagents';
-  let cwd = null, firstUserText = null, summaryTitle = null, gitBranch = null, version = null, model = null;
+  let cwd = null, firstUserText = null, summaryTitle = null, customTitle = null;
+  let gitBranch = null, version = null, model = null;
   let thinkingEffort = null;
   let firstTs = null, lastTs = null, userCount = 0, assistantCount = 0, lastEventText = null;
   let sessionId = path.basename(file, '.jsonl');
@@ -385,6 +386,9 @@ function summarizeClaude(file, stat, content) {
       subagentType = l.attributionAgent || subagentType;
     } else if (l.sessionId) sessionId = l.sessionId;
     if (l.type === 'summary' && l.summary) summaryTitle = l.summary;
+    if (l.type === 'custom-title' && typeof l.customTitle === 'string' && l.customTitle.trim()) {
+      customTitle = l.customTitle.trim();
+    }
     if (l.type === 'user' && l.message && (!l.isSidechain || isSubagent) && !l.isMeta) {
       const text = extractText(l.message.content);
       if (text && !isNoiseUserText(text) && !parseClaudeTaskNotification(text)) {
@@ -427,7 +431,7 @@ function summarizeClaude(file, stat, content) {
     project: cwd || decodeClaudeDirName(path.basename(isSubagent
       ? path.dirname(path.dirname(path.dirname(file)))
       : path.dirname(file))),
-    title: truncate(summaryTitle || firstUserText || '(无标题)', 80),
+    title: truncate(customTitle || summaryTitle || firstUserText || '(无标题)', 80),
     lastMessage: truncate(lastEventText || '', 120),
     firstTs, lastTs,
     turns: userCount + assistantCount,

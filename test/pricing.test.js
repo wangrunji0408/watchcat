@@ -242,6 +242,19 @@ test('deduplicates repeated Claude log entries by message id', () => {
   assert.equal(summary.cost.usd, 0.0017);
 });
 
+test('uses the latest Claude Code custom title after rename', () => {
+  const rows = [
+    { type: 'user', message: { content: 'original prompt' } },
+    { type: 'summary', summary: 'Generated summary' },
+    { type: 'custom-title', customTitle: 'First rename' },
+    { type: 'custom-title', customTitle: '  Latest renamed session  ' },
+  ];
+  const summary = summarizeClaude('/tmp/session.jsonl', { size: 1 },
+    rows.map(JSON.stringify).join('\n'));
+
+  assert.equal(summary.title, 'Latest renamed session');
+});
+
 test('splits usage records into per-day per-model cost buckets', () => {
   const { summarizeDailyRecords } = require('../server');
   const usage = normalizedUsage({ input_tokens: 1_000_000, output_tokens: 0 }, 'claude');
