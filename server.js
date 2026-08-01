@@ -56,6 +56,11 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+function truncateBlock(s, n) {
+  if (typeof s !== 'string') return '';
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
@@ -1340,9 +1345,27 @@ function detailHermes(sessionId) {
   const db = getHermesDb();
   if (!db) throw httpError(404, 'hermes db unavailable');
   const rows = db.prepare(`
-    SELECT role, content, tool_name, tool_calls, reasoning, timestamp
+    SELECT role, content, tool_call_id, tool_name, tool_calls, reasoning, timestamp
     FROM messages WHERE session_id = ? ORDER BY timestamp, id
   `).all(sessionId);
+  return detailHermesRows(rows);
+}
+
+function hermesToolResultText(name, content) {
+  const parsed = parseToolArgs(content);
+  if (!parsed) return String(content || '');
+  const short = shortToolName(name);
+  if (short === 'terminal' && typeof parsed.output === 'string') {
+    const parts = [parsed.output];
+    if (parsed.error) parts.push(String(parsed.error));
+    return parts.filter(Boolean).join('\n');
+  }
+  if (isReadToolName(name) && typeof parsed.content === 'string') return parsed.content;
+  if (typeof parsed.diff === 'string') return parsed.diff;
+  return JSON.stringify(parsed, null, 2);
+}
+
+function detailHermesRows(rows) {
   const msgs = [];
   for (const r of rows) {
     const ts = r.timestamp ? new Date(r.timestamp * 1000).toISOString() : null;
@@ -1356,16 +1379,17 @@ function detailHermes(sessionId) {
           for (const tc of JSON.parse(r.tool_calls)) {
             const fn = tc.function || tc;
             const input = truncate(String(fn.arguments || ''), 400);
-            msgs.push({ role: 'tool_use', ts, toolName: fn.name || '?', callId: tc.id || null,
+            msgs.push({ role: 'tool_use', ts, toolName: fn.name || '?', callId: tc.id || tc.call_id || null,
               input, ...toolRenderData(fn.name, fn.arguments), text: (fn.name || '?') + ' ' + input });
           }
         } catch {}
       }
     } else if (r.role === 'tool' && r.content) {
       const isRead = isReadToolName(r.tool_name);
-      const output = isRead ? r.content : truncate(r.content, 600);
-      msgs.push({ role: 'tool_result', ts, toolName: r.tool_name || '?', output, text: output,
-        ...(isRead ? { readContent: r.content } : {}) });
+      const rawOutput = hermesToolResultText(r.tool_name, r.content);
+      const output = isRead ? rawOutput : truncateBlock(rawOutput, 600);
+      msgs.push({ role: 'tool_result', ts, toolName: r.tool_name || '?', callId: r.tool_call_id || null,
+        output, text: output, ...(isRead ? { readContent: rawOutput } : {}) });
     }
   }
   return msgs;
@@ -1374,7 +1398,7 @@ function detailHermes(sessionId) {
 // ---------- 会话详情 ----------
 
 function extractEditCall(name, raw) {
-  if (shortToolName(name) !== 'edit') return null;
+  if (!['edit', 'patch'].includes(shortToolName(name))) return null;
   const args = parseToolArgs(raw);
   if (!args) return null;
   const oldText = args.old_string ?? args.oldText;
@@ -1406,13 +1430,13 @@ function parseToolArgs(raw) {
 }
 
 function extractBashCall(name, raw) {
-  if (shortToolName(name) !== 'bash') return null;
+  if (!['bash', 'terminal'].includes(shortToolName(name))) return null;
   const args = parseToolArgs(raw);
   return args && typeof args.command === 'string' ? { command: args.command } : null;
 }
 
 function extractWriteCall(name, raw) {
-  if (shortToolName(name) !== 'write') return null;
+  if (!['write', 'write_file', 'writefile'].includes(shortToolName(name))) return null;
   const args = parseToolArgs(raw);
   if (!args || typeof args.content !== 'string') return null;
   return {
@@ -1979,6 +2003,7 @@ module.exports = {
   detailClaude,
   detailCodex,
   detailDsh,
+  detailHermesRows,
   detailOpenClaw,
   discoverRemoteHosts,
   extractThinkingEffort,

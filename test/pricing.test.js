@@ -8,6 +8,7 @@ const {
   detailClaude,
   detailCodex,
   detailDsh,
+  detailHermesRows,
   detailOpenClaw,
   extractThinkingEffort,
   normalizeModelName,
@@ -19,6 +20,45 @@ const {
   summarizeOpenClaw,
   summarizeUsageRecords,
 } = require('../server');
+
+test('renders Hermes file and terminal tool calls with paired results', () => {
+  const rows = [
+    { role: 'assistant', content: '', reasoning: null, timestamp: 1, tool_calls: JSON.stringify([
+      { id: 'write-1', function: { name: 'write_file', arguments: JSON.stringify({ path: '/tmp/a.js', content: 'ok();' }) } },
+      { id: 'term-1', function: { name: 'terminal', arguments: JSON.stringify({ command: 'npm test' }) } },
+    ]) },
+    { role: 'tool', content: JSON.stringify({ bytes_written: 5 }), tool_name: 'write_file',
+      tool_call_id: 'write-1', timestamp: 2 },
+    { role: 'tool', content: JSON.stringify({ output: 'tests passed\n', exit_code: 0 }), tool_name: 'terminal',
+      tool_call_id: 'term-1', timestamp: 3 },
+  ];
+
+  const detail = detailHermesRows(rows);
+  assert.deepEqual(detail[0].write, { path: '/tmp/a.js', content: 'ok();' });
+  assert.deepEqual(detail[1].bash, { command: 'npm test' });
+  assert.equal(detail[2].callId, 'write-1');
+  assert.equal(detail[3].callId, 'term-1');
+  assert.equal(detail[3].output, 'tests passed\n');
+});
+
+test('renders Hermes read_file and patch calls using structured views', () => {
+  const rows = [
+    { role: 'assistant', content: '', reasoning: null, timestamp: 1, tool_calls: JSON.stringify([
+      { call_id: 'read-1', function: { name: 'read_file', arguments: '{"path":"README.md"}' } },
+      { id: 'patch-1', function: { name: 'patch', arguments: JSON.stringify({
+        path: 'README.md', old_string: 'old', new_string: 'new', mode: 'replace',
+      }) } },
+    ]) },
+    { role: 'tool', content: JSON.stringify({ content: '# title\n' }), tool_name: 'read_file',
+      tool_call_id: 'read-1', timestamp: 2 },
+  ];
+
+  const detail = detailHermesRows(rows);
+  assert.deepEqual(detail[0].read, { path: 'README.md', offset: null, limit: null, pages: null });
+  assert.deepEqual(detail[1].edit, { path: 'README.md', oldText: 'old', newText: 'new', replaceAll: false });
+  assert.equal(detail[2].callId, 'read-1');
+  assert.equal(detail[2].readContent, '# title\n');
+});
 
 test('parses DeepSeek Harness summaries and message details', () => {
   const rows = [
