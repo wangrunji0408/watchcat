@@ -10,3 +10,7 @@ pm2 restart watchcat
 ```
 
 Then verify that the `watchcat` process is online with `pm2 status watchcat`.
+
+## Testing
+
+Do not copy real session data into tests.
