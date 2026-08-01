@@ -531,6 +531,7 @@ function decorateClaudeSubagentSummary(summary) {
 function summarizeCodex(file, stat, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   let cwd = null, sessionId = path.basename(file, '.jsonl'), source = null, model = null;
+  let sessionKind = 'agent', parentSessionId = null, subagentType = null;
   let thinkingEffort = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
   let userCount = 0, agentCount = 0, contextTokens = null;
@@ -543,8 +544,15 @@ function summarizeCodex(file, stat, content) {
     const p = l.payload || {};
     if (l.type === 'session_meta') {
       cwd = p.cwd || cwd;
-      sessionId = p.session_id || p.id || sessionId;
+      sessionId = p.id || p.session_id || sessionId;
       source = p.originator || p.source || source;
+      if (p.thread_source === 'subagent' || p.parent_thread_id) {
+        sessionKind = 'subagent';
+        parentSessionId = p.parent_thread_id || (p.session_id !== sessionId ? p.session_id : null);
+        const subagent = p.source && p.source.subagent;
+        subagentType = typeof subagent === 'string' ? subagent :
+          subagent && (subagent.other || Object.values(subagent)[0]) || null;
+      }
     }
     if (l.type === 'turn_context') {
       if (p.model) { model = p.model; models.add(model); }
@@ -580,7 +588,9 @@ function summarizeCodex(file, stat, content) {
     id: sessionId,
     file,
     project: cwd || '(未知项目)',
-    title: truncate(firstUserText || '(无标题)', 80),
+    title: sessionKind === 'subagent' && subagentType === 'guardian'
+      ? 'Codex auto-review'
+      : truncate(firstUserText || '(无标题)', 80),
     lastMessage: truncate(lastAgentText || '', 120),
     firstTs, lastTs,
     turns: userCount + agentCount,
@@ -593,6 +603,10 @@ function summarizeCodex(file, stat, content) {
     usage: totals.usage,
     cost: totals.cost,
     sizeBytes: stat.size,
+    sessionKind,
+    parentSessionId,
+    parentFile: null,
+    subagentType,
   };
 }
 
@@ -1886,6 +1900,22 @@ function attachSubagentEvents(messages, parentFile) {
   }).map(item => item.message);
 }
 
+function linkCodexSubagents(sessions) {
+  const byId = new Map();
+  const hostKey = session => session.remoteHost || 'local';
+  for (const session of sessions) {
+    if (session.source === 'codex' && session.id) {
+      byId.set(hostKey(session) + '\0' + session.id, session);
+    }
+  }
+  for (const session of sessions) {
+    if (session.source !== 'codex' || session.sessionKind !== 'subagent' || !session.parentSessionId) continue;
+    const parent = byId.get(hostKey(session) + '\0' + session.parentSessionId);
+    if (parent && parent !== session) session.parentFile = parent.file;
+  }
+  return sessions;
+}
+
 // ---------- API ----------
 
 async function collectSessions() {
@@ -1929,7 +1959,7 @@ async function collectSessions() {
   }
 
   sessions.push(...hermesSessions()); // hermes 的状态在读取时已确定
-  return { sessions, remote };
+  return { sessions: linkCodexSubagents(sessions), remote };
 }
 
 async function apiSessions() {
@@ -2149,6 +2179,7 @@ module.exports = {
   normalizeModelName,
   normalizedUsage,
   includeSubagentCosts,
+  linkCodexSubagents,
   parseRemoteScan,
   priceForModel,
   remoteAgentSessions,

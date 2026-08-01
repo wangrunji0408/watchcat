@@ -12,6 +12,7 @@ const {
   detailOpenClaw,
   extractThinkingEffort,
   includeSubagentCosts,
+  linkCodexSubagents,
   normalizeModelName,
   normalizedUsage,
   priceForModel,
@@ -182,6 +183,29 @@ test('extracts Codex thinking effort from turn context', () => {
   const content = rows.map(JSON.stringify).join('\n');
   const summary = summarizeCodex('/tmp/session.jsonl', { size: content.length }, content);
   assert.equal(summary.thinkingEffort, 'high');
+});
+
+test('recognizes Codex auto-review as a guardian subagent', () => {
+  const rows = [
+    { type: 'session_meta', timestamp: '2026-08-01T00:00:00Z', payload: {
+      session_id: 'parent-1', id: 'review-1', parent_thread_id: 'parent-1',
+      cwd: '/tmp/project', thread_source: 'subagent', source: { subagent: { other: 'guardian' } },
+    } },
+    { type: 'turn_context', payload: { model: 'codex-auto-review', effort: 'low' } },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'Review this action' } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const review = summarizeCodex('/tmp/review.jsonl', { size: content.length }, content);
+  const parent = { source: 'codex', id: 'parent-1', file: '/tmp/parent.jsonl' };
+
+  linkCodexSubagents([parent, review]);
+
+  assert.equal(review.id, 'review-1');
+  assert.equal(review.title, 'Codex auto-review');
+  assert.equal(review.sessionKind, 'subagent');
+  assert.equal(review.subagentType, 'guardian');
+  assert.equal(review.parentSessionId, 'parent-1');
+  assert.equal(review.parentFile, '/tmp/parent.jsonl');
 });
 
 test('normalizes provider and dated model aliases', () => {
