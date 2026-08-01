@@ -598,7 +598,8 @@ function summarizeDsh(file, stat, content) {
   let cwd = null, sessionId = path.basename(path.dirname(file)), title = null, model = null;
   let thinkingEffort = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
-  let userCount = 0, agentCount = 0, contextTokens = null;
+  let userCount = 0, agentCount = 0, contextTokens = null, contextPeak = 0;
+  const contextPeaks = [];
   const models = new Set();
   const usageRecords = [];
   const activityByDay = new Map();
@@ -616,9 +617,13 @@ function summarizeDsh(file, stat, content) {
       const config = d.header && d.header.config || {};
       if (config.model) { model = config.model; models.add(model); }
       thinkingEffort = config.reasoningEffort || config.reasoning_effort || thinkingEffort;
+    } else if (l.type === 'compact/start') {
+      if (contextPeak) contextPeaks.push(contextPeak);
+      contextPeak = 0;
+      contextTokens = null;
     } else if (l.type === 'user/message') {
       const text = extractText(d.content);
-      if (text && !isNoiseUserText(text)) {
+      if (text && !isNoiseUserText(text) && !isDshCompactionMessage(text)) {
         userCount++;
         if (!firstUserText) firstUserText = text;
         bumpDate(activityByDay, ts);
@@ -630,6 +635,7 @@ function summarizeDsh(file, stat, content) {
       if (text) { agentCount++; lastAgentText = text; bumpDate(activityByDay, ts); }
       if (d.usage) {
         contextTokens = Number(d.usage.inputTokens || 0) + Number(d.usage.cacheReadTokens || 0);
+        contextPeak = Math.max(contextPeak, contextTokens);
         usageRecords.push({
           model,
           usage: normalizedUsage({
@@ -662,6 +668,7 @@ function summarizeDsh(file, stat, content) {
     models: [...models],
     thinkingEffort,
     contextTokens,
+    contextPeaks,
     usage: totals.usage,
     cost: totals.cost,
     sizeBytes: stat.size,
@@ -1589,17 +1596,65 @@ function dshToolResultText(message) {
   return parts.join('\n');
 }
 
+function isDshCompactionMessage(text) {
+  return typeof text === 'string' &&
+    (text.includes('<compacted-summary>') ||
+      /automatically generated checkpoint condensing an earlier span/i.test(text));
+}
+
 function detailDsh(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
   const readCalls = new Set();
+  const toolNamesByCall = new Map();
+  const completedCalls = new Set();
+  let contextPeak = 0;
+  let pendingCompaction = null;
+  const flushCompaction = (endTs) => {
+    if (!pendingCompaction) return;
+    const endMs = endTs ? Date.parse(endTs) : NaN;
+    const startMs = pendingCompaction.ts ? Date.parse(pendingCompaction.ts) : NaN;
+    msgs.push({
+      role: 'compaction',
+      ...pendingCompaction,
+      durationMs: Number.isFinite(endMs) && Number.isFinite(startMs) ? endMs - startMs : null,
+    });
+    pendingCompaction = null;
+  };
   for (const l of lines) {
     const d = l.data || {};
     const ts = isoTime(l.time ?? l.createdAt);
-    if (l.type === 'user/message') {
+    if (l.type === 'compact/start') {
+      flushCompaction(ts);
+      pendingCompaction = {
+        ts,
+        trigger: 'auto',
+        beforeTokens: contextPeak || null,
+        turn: d.turn ?? null,
+        summary: '',
+        shadowedTokens: null,
+        shadowedRange: null,
+        model: null,
+      };
+      contextPeak = 0;
+    } else if (l.type === 'compact/summary') {
+      if (!pendingCompaction) pendingCompaction = { ts, trigger: 'auto', beforeTokens: null, turn: null };
+      pendingCompaction.summary = extractText(d.summary) || extractText(d.rawOutput);
+      pendingCompaction.shadowedTokens = d.shadowedTokenCount ?? null;
+      pendingCompaction.shadowedRange = d.shadowedRange || null;
+      pendingCompaction.model = d.model || null;
+    } else if (l.type === 'compact/end') {
+      flushCompaction(ts);
+    } else if (l.type === 'user/message') {
       const value = extractText(d.content);
-      if (value && !isNoiseUserText(value)) msgs.push({ role: 'user', text: value, ts });
+      if (value && !isNoiseUserText(value) && !isDshCompactionMessage(value)) {
+        msgs.push({ role: 'user', text: value, ts });
+      }
     } else if (l.type === 'assistant/message' && d.message) {
+      if (d.usage) {
+        const context = Number(d.usage.inputTokens || 0) + Number(d.usage.cacheReadTokens || 0);
+        contextPeak = Math.max(contextPeak, context);
+      }
       for (const item of Array.isArray(d.message.content) ? d.message.content : []) {
         if (item.type === 'text' && item.text) {
           msgs.push({ role: 'assistant', text: item.text, ts });
@@ -1612,17 +1667,21 @@ function detailDsh(file, content) {
       const input = truncate(typeof raw === 'string' ? raw : JSON.stringify(raw), 400);
       const renderData = toolRenderData(d.name, raw);
       if (renderData.read && d.callId) readCalls.add(d.callId);
+      if (d.callId) toolNamesByCall.set(d.callId, d.name || '?');
       msgs.push({ role: 'tool_use', ts, toolName: d.name || '?', callId: d.callId || null,
         input, ...renderData, text: (d.name || '?') + ' ' + input });
     } else if (l.type === 'tool/result') {
       const rawOutput = dshToolResultText(d.message);
       const callId = d.callId || d.message && d.message.source && d.message.source.callId || null;
+      if (callId && completedCalls.has(callId)) continue;
+      if (callId) completedCalls.add(callId);
       const isRead = callId && readCalls.has(callId);
       const output = isRead ? rawOutput : truncate(rawOutput, 600);
-      msgs.push({ role: 'tool_result', ts, callId, output, text: output,
+      msgs.push({ role: 'tool_result', ts, toolName: toolNamesByCall.get(callId) || '?', callId, output, text: output,
         ...(isRead ? { readContent: rawOutput } : {}) });
     }
   }
+  flushCompaction(null);
   return msgs;
 }
 

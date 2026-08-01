@@ -144,6 +144,15 @@
   .msg.compaction { display: flex; align-items: center; gap: 9px; color: var(--dim); font-size: 12px; }
   .msg.compaction::before, .msg.compaction::after { content: ''; height: 1px; background: var(--border); flex: 1; }
   .compaction-label { white-space: nowrap; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; }
+  details.msg.compaction { display: block; }
+  details.msg.compaction::before, details.msg.compaction::after { display: none; }
+  .compaction-summary { display: flex; align-items: center; gap: 9px; cursor: pointer; list-style: none; }
+  .compaction-summary::-webkit-details-marker { display: none; }
+  .compaction-summary::before, .compaction-summary::after { content: ''; height: 1px; background: var(--border); flex: 1; }
+  .compaction-summary .compaction-label::before { content: '›'; display: inline-block; margin-right: 5px; transition: transform .15s; }
+  details[open] > .compaction-summary .compaction-label::before { transform: rotate(90deg); }
+  .compaction-content { max-width: 900px; margin: 8px auto 0; padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: 7px; background: var(--panel2); color: var(--text); font-size: 13px; }
   .empty { color: var(--dim); text-align: center; margin-top: 15vh; }
   .stats-btn { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 8px; padding: 4px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
@@ -271,7 +280,7 @@ const MESSAGES = {
     viewSubagent: 'View subagent log', automatic: 'automatic', manual: 'manual', beforeCompaction: '{n} tokens before compaction', compacted: 'Context compacted',
     noMessages: 'No messages to display', loadFailed: 'Failed to load: {error}', jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun',
     jul: 'Jul', aug: 'Aug', sep: 'Sep', oct: 'Oct', nov: 'Nov', dec: 'Dec', mon: 'M', wed: 'W', fri: 'F',
-    offset: 'offset', limit: 'limit', pages: 'pages'
+    offset: 'offset', limit: 'limit', pages: 'pages', contextFormat: 'Context {value}'
   },
   zh: {
     pageTitle: 'Watchcat · Agent 会话监控', stats: '📊 统计', running: '运行中', open: '存活', idle: '空闲',
@@ -293,7 +302,7 @@ const MESSAGES = {
     viewSubagent: '点击查看 subagent 记录', automatic: '自动', manual: '手动', beforeCompaction: '压缩前 {n} tokens', compacted: '上下文已压缩',
     noMessages: '没有可显示的消息', loadFailed: '加载失败：{error}', jan: '1月', feb: '2月', mar: '3月', apr: '4月', may: '5月', jun: '6月',
     jul: '7月', aug: '8月', sep: '9月', oct: '10月', nov: '11月', dec: '12月', mon: '一', wed: '三', fri: '五',
-    offset: '起始行', limit: '行数', pages: '页码'
+    offset: '起始行', limit: '行数', pages: '页码', contextFormat: '上下文 {value}'
   },
 };
 let language = localStorage.getItem('watchcat-language') || (navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en');
@@ -386,6 +395,13 @@ function fmtAge(ts) {
 function fmtK(n) {
   if (n == null) return '';
   return n >= 1000 ? Math.round(n / 1000) + 'K' : String(n);
+}
+function contextValue(s) {
+  const values = [...(s.contextPeaks || []), s.contextTokens].filter(n => n != null);
+  return values.map(fmtK).join('+');
+}
+function contextText(s) {
+  return t('contextFormat', { value: contextValue(s) });
 }
 function fmtUsd(n) {
   if (n == null || !Number.isFinite(n)) return '';
@@ -1179,7 +1195,7 @@ function sessionRow(s, showProject) {
   }
   if (s.contextTokens != null) {
     sub.appendChild(document.createTextNode(' · '));
-    sub.appendChild(el('span', 'ctx', fmtK(s.contextTokens) + ' ctx'));
+    sub.appendChild(el('span', 'ctx', contextValue(s)));
   }
   if (s.usage && s.cost && s.cost.usd != null) {
     sub.appendChild(document.createTextNode(' · '));
@@ -1312,7 +1328,7 @@ async function openSession(s, keepScroll) {
     if (s.id) metrics.push('Session ID ' + s.id);
     if (s.model) metrics.push(t('model', { name: s.model }) + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));
     if (s.thinkingEffort) metrics.push(t('thinkingEffort', { value: s.thinkingEffort }));
-    if (s.contextTokens != null) metrics.push(fmtK(s.contextTokens) + ' ctx');
+    if (s.contextTokens != null) metrics.push(contextText(s));
     if (s.usage) metrics.push(costText(s.cost));
     const metricsNode = el('div', 'detail-metrics', metrics.join(' · '));
     metricsNode.title = costTitle(s);
@@ -1359,8 +1375,20 @@ async function openSession(s, keepScroll) {
         }
         if (m.durationMs != null) details.push((m.durationMs / 1000).toFixed(1) + 's');
         if (m.ts) details.push(fmtTime(m.ts));
-        const box = el('div', 'msg compaction');
-        box.appendChild(el('span', 'compaction-label', t('compacted') + (details.length ? ' · ' + details.join(' · ') : '')));
+        const label = t('compacted') + (details.length ? ' · ' + details.join(' · ') : '');
+        let box;
+        if (m.summary) {
+          box = expandable('details', 'msg compaction', s.file + ':compaction:' + i);
+          const summary = el('summary', 'compaction-summary');
+          summary.appendChild(el('span', 'compaction-label', label));
+          box.appendChild(summary);
+          const content = el('div', 'compaction-content');
+          content.appendChild(renderMarkdown(m.summary, 'markdown-body'));
+          box.appendChild(content);
+        } else {
+          box = el('div', 'msg compaction');
+          box.appendChild(el('span', 'compaction-label', label));
+        }
         main.appendChild(box);
         i++;
         continue;

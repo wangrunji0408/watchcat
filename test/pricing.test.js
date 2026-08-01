@@ -105,6 +105,10 @@ test('parses DeepSeek Harness summaries and message details', () => {
       source: { kind: 'tool', callId: 'call-1' }, content: [{
       type: 'tool-result', content: [{ type: 'text', text: 'tests passed' }],
     }] } } },
+    { type: 'tool/result', time: 1785515767000, data: { message: {
+      source: { kind: 'tool', callId: 'call-1' }, content: [{
+      type: 'tool-result', content: [{ type: 'text', text: 'tests passed' }],
+    }] } } },
   ];
   const content = rows.map(JSON.stringify).join('\n');
   const file = '/tmp/project/session-1/session.jsonl.zstd';
@@ -124,7 +128,46 @@ test('parses DeepSeek Harness summaries and message details', () => {
   assert.deepEqual(detail.map(m => m.role), ['user', 'thinking', 'assistant', 'tool_use', 'tool_result']);
   assert.deepEqual(detail[3].bash, { command: 'npm test' });
   assert.equal(detail[4].callId, 'call-1');
+  assert.equal(detail[4].toolName, 'bash');
   assert.equal(detail[4].output, 'tests passed');
+  assert.equal(detail.filter(message => message.role === 'tool_result').length, 1);
+});
+
+test('renders DeepSeek Harness compaction summaries and context peaks', () => {
+  const rows = [
+    { type: 'session', id: 'session-compact', createdAt: 1785515761000, cwd: '/tmp/project' },
+    { type: 'user/message', time: 1785515762000, data: { content: [{ type: 'text', text: 'work' }] } },
+    { type: 'assistant/message', time: 1785515763000, data: {
+      message: { source: { model: 'deepseek-v4-flash' }, content: [{ type: 'text', text: 'before' }] },
+      usage: { inputTokens: 1000, cacheReadTokens: 999000, outputTokens: 10 },
+    } },
+    { type: 'compact/start', time: 1785515764000, data: { turn: 1 } },
+    { type: 'compact/summary', time: 1785515765500, data: {
+      summary: [{ type: 'text', text: '## Checkpoint\n\nContinue from here.' }],
+      shadowedTokenCount: 900000, shadowedRange: { start: 1, end: 20 }, model: 'deepseek-v4-flash',
+    } },
+    { type: 'user/message', time: 1785515765750, data: { content: [
+      { type: 'text', text: 'This is an automatically generated checkpoint condensing an earlier span.' },
+      { type: 'text', text: '<compacted-summary>\n## Checkpoint\n\nContinue from here.\n</compacted-summary>' },
+    ] } },
+    { type: 'compact/end', time: 1785515766000, data: { turn: 1 } },
+    { type: 'assistant/message', time: 1785515767000, data: {
+      message: { source: { model: 'deepseek-v4-flash' }, content: [{ type: 'text', text: 'after' }] },
+      usage: { inputTokens: 1000, cacheReadTokens: 380000, outputTokens: 10 },
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeDsh('/tmp/session.jsonl.zstd', { size: content.length }, content);
+  const detail = detailDsh('/tmp/session.jsonl.zstd', content);
+
+  assert.deepEqual(summary.contextPeaks, [1000000]);
+  assert.equal(summary.contextTokens, 381000);
+  assert.equal(summary.turns, 3);
+  assert.deepEqual(detail.map(message => message.role), ['user', 'assistant', 'compaction', 'assistant']);
+  assert.equal(detail[2].beforeTokens, 1000000);
+  assert.equal(detail[2].durationMs, 2000);
+  assert.equal(detail[2].summary, '## Checkpoint\n\nContinue from here.');
+  assert.equal(detail[2].shadowedTokens, 900000);
 });
 
 test('extracts Codex thinking effort from turn context', () => {
