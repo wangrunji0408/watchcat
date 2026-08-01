@@ -173,6 +173,31 @@ test('renders DeepSeek Harness compaction summaries and context peaks', () => {
   assert.equal(detail[2].shadowedTokens, 900000);
 });
 
+test('renders DeepSeek Harness background task completions as task events', () => {
+  const rows = [
+    { type: 'user/message', time: 1785515762000, data: {
+      content: [{ type: 'text', text:
+        'background task bash-7 (bash: npm test) finished [status: completed, exit code: 0]. Read its output with task_output.' }],
+      source: { kind: 'plugin', plugin: 'tool-tasks' }, role: 'user',
+    } },
+    { type: 'user/message', time: 1785515763000, data: {
+      content: [{ type: 'text', text:
+        'background task bash-8 (bash: ordinary user text) finished [status: completed, exit code: 0].' }],
+      role: 'user',
+    } },
+  ];
+
+  const detail = detailDsh('/tmp/session.jsonl.zstd', rows.map(JSON.stringify).join('\n'));
+
+  assert.equal(detail[0].role, 'background_task');
+  assert.equal(detail[0].event, 'completed');
+  assert.equal(detail[0].taskId, 'bash-7');
+  assert.equal(detail[0].toolName, 'bash');
+  assert.equal(detail[0].command, 'npm test');
+  assert.equal(detail[0].exitCode, 0);
+  assert.equal(detail[1].role, 'user');
+});
+
 test('extracts Codex thinking effort from turn context', () => {
   const rows = [
     { type: 'session_meta', timestamp: '2026-07-17T00:00:00Z',

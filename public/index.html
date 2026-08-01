@@ -278,6 +278,7 @@ const MESSAGES = {
     statsLoadFailed: 'Failed to load stats: {error}', refreshFailed: 'Refresh failed: {error}', parentSession: 'Parent session: {id}', rounds: '{n} turns',
     runningCount: '{n} running', sessions: '{n} sessions', projectsSummary: '{projects} projects · {sessions} sessions', sshErrors: 'SSH errors', noSessions: 'No session logs found',
     model: 'Model {name}', thinkingEffort: 'Thinking effort {value}', user: 'User', assistant: 'Assistant', agentStarted: 'Agent started', agentCompleted: 'Agent completed',
+    backgroundTaskCompleted: 'Background task completed', backgroundTaskStatus: 'Background task: {status}', exitCode: 'exit {code}',
     agentFailed: 'Agent failed', agentTimeout: 'Agent timed out', agentCancelled: 'Agent cancelled', agentAborted: 'Agent aborted', agentStatus: 'Agent status',
     viewSubagent: 'View subagent log', automatic: 'automatic', manual: 'manual', beforeCompaction: '{n} tokens before compaction', compacted: 'Context compacted',
     noMessages: 'No messages to display', loadFailed: 'Failed to load: {error}', jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun',
@@ -300,6 +301,7 @@ const MESSAGES = {
     statsLoadFailed: '统计加载失败：{error}', refreshFailed: '刷新失败：{error}', parentSession: '父会话：{id}', rounds: '{n} 轮',
     runningCount: '{n} 运行', sessions: '{n} 会话', projectsSummary: '{projects} 项目 · {sessions} 会话', sshErrors: 'SSH 异常', noSessions: '没有找到任何会话日志',
     model: '模型 {name}', thinkingEffort: '思考强度 {value}', user: '用户', assistant: '助手', agentStarted: 'Agent 已创建', agentCompleted: 'Agent 完成',
+    backgroundTaskCompleted: '后台任务已完成', backgroundTaskStatus: '后台任务：{status}', exitCode: '退出码 {code}',
     agentFailed: 'Agent 失败', agentTimeout: 'Agent 超时', agentCancelled: 'Agent 已取消', agentAborted: 'Agent 已中止', agentStatus: 'Agent 状态',
     viewSubagent: '点击查看 subagent 记录', automatic: '自动', manual: '手动', beforeCompaction: '压缩前 {n} tokens', compacted: '上下文已压缩',
     noMessages: '没有可显示的消息', loadFailed: '加载失败：{error}', jan: '1月', feb: '2月', mar: '3月', apr: '4月', may: '5月', jun: '6月',
@@ -639,6 +641,10 @@ function renderActivity(messages, start, sessionFile) {
         rows.push({ type: 'tool', call, timelineIndex });
       }
       call.results.push(m);
+    } else if (m.role === 'background_task') {
+      const call = { use: null, results: [], backgroundTask: m, timelineIndex };
+      calls.push(call);
+      rows.push({ type: 'tool', call, timelineIndex });
     }
   });
 
@@ -660,10 +666,18 @@ function renderActivity(messages, start, sessionFile) {
 
     const call = row.call;
     const item = expandable('details', 'tool-item', key + ':tool:' + row.timelineIndex);
-    const name = call.use ? toolName(call.use) : (call.results[0] && toolName(call.results[0])) || t('toolResult');
+    const task = call.backgroundTask;
+    const taskStatus = task && (task.event === 'completed'
+      ? t('backgroundTaskCompleted') : t('backgroundTaskStatus', { status: task.event }));
+    const name = task
+      ? [taskStatus, task.taskId, task.toolName, task.exitCode == null ? null : t('exitCode', { code: task.exitCode })]
+        .filter(Boolean).join(' · ')
+      : call.use ? toolName(call.use) : (call.results[0] && toolName(call.results[0])) || t('toolResult');
     item.appendChild(el('summary', null, name + (call.use && call.use.ts ? ' · ' + fmtTime(call.use.ts) : '')));
     const detail = el('div', 'tool-detail');
-    if (call.use) {
+    if (task) {
+      detail.appendChild(renderBash(task.command || task.text || ''));
+    } else if (call.use) {
       detail.appendChild(el('div', 'tool-detail-label', t('toolUse')));
       detail.appendChild(call.use.edit
         ? renderEditDiff(call.use.edit)
@@ -677,7 +691,7 @@ function renderActivity(messages, start, sessionFile) {
     }
     const resultText = call.results.length
       ? call.results.map(r => r.readContent ?? r.output ?? r.text ?? '').join('\n') : t('noResult');
-    if (!call.use || !isDuplicatePatchResult(call.use, resultText)) {
+    if (!task && (!call.use || !isDuplicatePatchResult(call.use, resultText))) {
       detail.appendChild(el('div', 'tool-detail-label', t('toolResult')));
       detail.appendChild(call.use && call.use.bash
         ? renderBash(resultText)
@@ -1372,9 +1386,9 @@ async function openSession(s, keepScroll) {
         i++;
         continue;
       }
-      if (m.role === 'thinking' || m.role === 'tool_use' || m.role === 'tool_result') {
+      if (m.role === 'thinking' || m.role === 'tool_use' || m.role === 'tool_result' || m.role === 'background_task') {
         let end = i + 1;
-        while (end < data.messages.length && ['thinking', 'tool_use', 'tool_result'].includes(data.messages[end].role)) end++;
+        while (end < data.messages.length && ['thinking', 'tool_use', 'tool_result', 'background_task'].includes(data.messages[end].role)) end++;
         main.appendChild(renderActivity(data.messages.slice(i, end), i, s.file));
         i = end;
         continue;

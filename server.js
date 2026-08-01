@@ -1724,6 +1724,22 @@ function isDshCompactionMessage(text) {
       /automatically generated checkpoint condensing an earlier span/i.test(text));
 }
 
+function parseDshBackgroundTask(message) {
+  if (!message || message.source?.kind !== 'plugin' || message.source.plugin !== 'tool-tasks') return null;
+  const text = extractText(message.content);
+  const match = text.match(/^background task (\S+) \(([^:\s()]+): ([\s\S]*)\) finished \[status: ([^,\]]+)(?:, exit code: (-?\d+))?\]\./i);
+  if (!match) return null;
+  return {
+    role: 'background_task',
+    event: match[4].trim().toLowerCase(),
+    taskId: match[1],
+    toolName: match[2],
+    command: match[3],
+    exitCode: match[5] == null ? null : Number(match[5]),
+    text,
+  };
+}
+
 function detailDsh(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
@@ -1769,7 +1785,10 @@ function detailDsh(file, content) {
       flushCompaction(ts);
     } else if (l.type === 'user/message') {
       const value = extractText(d.content);
-      if (value && !isNoiseUserText(value) && !isDshCompactionMessage(value)) {
+      const backgroundTask = parseDshBackgroundTask(d);
+      if (backgroundTask) {
+        msgs.push({ ...backgroundTask, ts });
+      } else if (value && !isNoiseUserText(value) && !isDshCompactionMessage(value)) {
         msgs.push({ role: 'user', text: value, ts });
       }
     } else if (l.type === 'assistant/message' && d.message) {
