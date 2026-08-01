@@ -460,6 +460,41 @@ test('renders Claude Code subagent launch and completion as agent events', () =>
   assert.equal(detail[1].title, 'Find benchmarks');
 });
 
+test('renders synchronous Claude Code Agent calls with their subagent type', () => {
+  const rows = [
+    { type: 'assistant', timestamp: '2026-07-19T00:00:00Z', message: { content: [{
+      type: 'tool_use', id: 'call-agent-1', name: 'Agent', input: {
+        description: 'Map the example modules', subagent_type: 'Explore',
+      },
+    }] } },
+    { type: 'user', timestamp: '2026-07-19T00:01:00Z', toolUseResult: {
+      agentId: 'example-agent-id', agentType: 'Explore',
+    }, message: { content: [{
+      type: 'tool_result', tool_use_id: 'call-agent-1', content: 'Example findings',
+    }] } },
+  ];
+  const detail = detailClaude('/tmp/example-project/main.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.deepEqual(detail.map(m => [m.role, m.event, m.agentId, m.subagentType]), [
+    ['subagent', 'started', 'example-agent-id', 'Explore'],
+    ['subagent', 'completed', 'example-agent-id', 'Explore'],
+  ]);
+  assert.equal(detail[0].title, 'Map the example modules');
+});
+
+test('remote scans retain subagents belonging to selected parent sessions', () => {
+  const lines = [];
+  for (let i = 0; i < 11; i++) {
+    lines.push(`FILE\tclaude\t${100 - i}\t10\t/remote/project/session-${i}.jsonl`);
+  }
+  lines.push('FILE\tclaude\t95\t5\t/remote/project/session-2/subagents/agent-example.jsonl');
+
+  const scan = require('../server').parseRemoteScan(lines.join('\n'));
+
+  assert.equal(scan.files.filter(file => !file.path.includes('/subagents/')).length, 10);
+  assert.ok(scan.files.some(file => file.path.endsWith('/session-2/subagents/agent-example.jsonl')));
+});
+
 test('preserves structured Edit arguments for diff rendering', () => {
   const edit = {
     type: 'assistant', timestamp: '2026-07-18T00:00:00Z', message: { content: [{

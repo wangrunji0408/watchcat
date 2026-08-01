@@ -1361,6 +1361,8 @@ async function openSession(s, keepScroll) {
         if (m.subagent) card.type = 'button';
         card.appendChild(el('div', 'subagent-card-title', m.title || m.agentId || 'Subagent'));
         const details = [];
+        const subagentType = m.subagent && m.subagent.subagentType || m.subagentType;
+        if (subagentType) details.push(subagentType);
         if (m.subagent && m.subagent.model) details.push(m.subagent.model);
         if (m.subagent) details.push(t('viewSubagent'));
         card.appendChild(el('div', 'subagent-card-sub', details.join(' · ') || m.text || ''));

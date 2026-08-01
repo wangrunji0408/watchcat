@@ -846,9 +846,9 @@ if [ -d "$codex_root" ]; then
 fi
 if [ -d "$claude_root" ]; then
   if stat -c '%Y' "$claude_root" >/dev/null 2>&1; then
-    find "$claude_root" -type f -name '*.jsonl' ! -path '*/subagents/*' -exec stat -c 'FILE\tclaude\t%Y\t%s\t%n' {} + 2>/dev/null
+    find "$claude_root" -type f -name '*.jsonl' -exec stat -c 'FILE\tclaude\t%Y\t%s\t%n' {} + 2>/dev/null
   else
-    find "$claude_root" -type f -name '*.jsonl' ! -path '*/subagents/*' -exec stat -f 'FILE\tclaude\t%m\t%z\t%N' {} + 2>/dev/null
+    find "$claude_root" -type f -name '*.jsonl' -exec stat -f 'FILE\tclaude\t%m\t%z\t%N' {} + 2>/dev/null
   fi
 fi
 if command -v lsof >/dev/null 2>&1; then
@@ -864,6 +864,13 @@ elif command -v lsof >/dev/null 2>&1; then
 fi
 `;
 
+function remoteClaudeParentPath(file) {
+  const subagentsDir = path.posix.dirname(file);
+  if (path.posix.basename(subagentsDir) !== 'subagents') return null;
+  const sessionDir = path.posix.dirname(subagentsDir);
+  return path.posix.join(path.posix.dirname(sessionDir), path.posix.basename(sessionDir) + '.jsonl');
+}
+
 function parseRemoteScan(stdout) {
   const result = { roots: {}, files: [], openFiles: new Set(), aliveProjects: {} };
   for (const line of stdout.split('\n')) {
@@ -878,7 +885,15 @@ function parseRemoteScan(stdout) {
     }
   }
   result.files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  result.files = result.files.slice(0, REMOTE_MAX_FILES);
+  const primary = result.files.filter(file =>
+    file.kind !== 'claude' || !remoteClaudeParentPath(file.path)).slice(0, REMOTE_MAX_FILES);
+  const primaryPaths = new Set(primary.map(file => file.kind + '\0' + file.path));
+  const children = result.files.filter(file => {
+    if (file.kind !== 'claude') return false;
+    const parent = remoteClaudeParentPath(file.path);
+    return parent && primaryPaths.has('claude\0' + parent);
+  });
+  result.files = [...primary, ...children].sort((a, b) => b.mtimeMs - a.mtimeMs);
   return result;
 }
 
@@ -898,8 +913,20 @@ function remoteCacheKey(kind, host, file) {
 
 function summarizeRemoteCacheEntry(entry) {
   const id = remoteFileId(entry.kind, entry.host, entry.path);
-  const summary = getSummary(entry.cacheFile, entry.kind);
-  return summary ? { ...summary, file: id, sizeBytes: entry.size } : null;
+  let summary;
+  try {
+    const content = fs.readFileSync(entry.cacheFile, 'utf8');
+    const stat = { mtimeMs: entry.mtimeMs, size: entry.size };
+    summary = entry.kind === 'claude'
+      ? summarizeClaude(entry.path, stat, content)
+      : summarizeCodex(entry.path, stat, content);
+  } catch {
+    return null;
+  }
+  if (!summary) return null;
+  const parentFile = summary.parentFile
+    ? remoteFileId(entry.kind, entry.host, summary.parentFile) : null;
+  return { ...summary, file: id, parentFile, sizeBytes: entry.size };
 }
 
 function remoteHistoryDigest(entry) {
@@ -1520,6 +1547,33 @@ function detailClaude(file, content) {
   const isSubagent = path.basename(path.dirname(file)) === 'subagents';
   const msgs = [];
   const readCalls = new Set();
+  const agentCalls = new Map();
+
+  if (!isSubagent) {
+    for (const l of lines) {
+      const items = l.message && Array.isArray(l.message.content) ? l.message.content : [];
+      if (l.type === 'assistant') {
+        for (const item of items) {
+          if (item.type !== 'tool_use' || (item.name !== 'Agent' && item.name !== 'Task') || !item.id) continue;
+          const input = item.input || {};
+          agentCalls.set(item.id, {
+            agentId: item.id,
+            title: input.description || input.subagent_type || 'Subagent',
+            subagentType: input.subagent_type || null,
+          });
+        }
+      } else if (l.type === 'user') {
+        for (const item of items) {
+          const call = item.type === 'tool_result' && agentCalls.get(item.tool_use_id);
+          if (!call) continue;
+          const result = l.toolUseResult || {};
+          if (result.agentId) call.agentId = result.agentId;
+          if (result.agentType) call.subagentType = result.agentType;
+        }
+      }
+    }
+  }
+
   for (const l of lines) {
     if (l.isSidechain && !isSubagent) continue;
     if (l.type === 'system' && l.subtype === 'compact_boundary') {
@@ -1535,9 +1589,13 @@ function detailClaude(file, content) {
     }
     if (!isSubagent && l.type === 'user' && l.toolUseResult && l.toolUseResult.agentId &&
         (l.toolUseResult.isAsync || l.toolUseResult.status === 'async_launched')) {
+      const callId = Array.isArray(l.message && l.message.content)
+        ? l.message.content.find(item => item.type === 'tool_result')?.tool_use_id : null;
+      if (callId && agentCalls.has(callId)) continue;
       msgs.push({
         role: 'subagent', event: 'started', agentId: l.toolUseResult.agentId,
         title: l.toolUseResult.description || l.toolUseResult.agentId,
+        subagentType: l.toolUseResult.agentType || null,
         text: 'Agent 已创建', ts: l.timestamp,
       });
       continue;
@@ -1557,6 +1615,19 @@ function detailClaude(file, content) {
           } else if (item.type === 'tool_result') {
             const text = extractText(item.content) || (typeof item.content === 'string' ? item.content : '');
             const callId = item.tool_use_id || null;
+            const agentCall = !isSubagent && callId && agentCalls.get(callId);
+            if (agentCall) {
+              const result = l.toolUseResult || {};
+              if (!result.isAsync && result.status !== 'async_launched') {
+                msgs.push({
+                  role: 'subagent', event: item.is_error ? 'failed' : 'completed',
+                  agentId: agentCall.agentId, title: agentCall.title,
+                  subagentType: agentCall.subagentType,
+                  text: item.is_error ? 'Agent 失败' : 'Agent 已完成', ts: l.timestamp,
+                });
+              }
+              continue;
+            }
             const isRead = callId && readCalls.has(callId);
             const output = isRead ? text : truncate(text, 600);
             msgs.push({ role: 'tool_result', output, text: output, callId, ts: l.timestamp,
@@ -1571,6 +1642,15 @@ function detailClaude(file, content) {
         } else if (item.type === 'thinking' && item.thinking) {
           msgs.push({ role: 'thinking', text: truncate(item.thinking, 600), ts: l.timestamp });
         } else if (item.type === 'tool_use') {
+          const agentCall = !isSubagent && agentCalls.get(item.id);
+          if (agentCall) {
+            msgs.push({
+              role: 'subagent', event: 'started', agentId: agentCall.agentId,
+              title: agentCall.title, subagentType: agentCall.subagentType,
+              text: 'Agent 已创建', ts: l.timestamp,
+            });
+            continue;
+          }
           const input = truncate(JSON.stringify(item.input || {}), 400);
           const renderData = toolRenderData(item.name, item.input);
           if (renderData.read && item.id) readCalls.add(item.id);
@@ -2115,9 +2195,10 @@ function apiSessionDetail(query) {
     const remote = remoteFileIndex.get(file);
     if (!remote) throw httpError(404, 'remote session not found; refresh sessions first');
     if (!fs.existsSync(remote.cacheFile)) throw httpError(404, 'remote session cache not found');
-    const messages = remote.kind === 'claude'
-      ? detailClaude(remote.cacheFile)
+    let messages = remote.kind === 'claude'
+      ? detailClaude(remote.path, fs.readFileSync(remote.cacheFile, 'utf8'))
       : detailCodex(remote.cacheFile);
+    messages = attachSubagentEvents(messages, file);
     return { file, source: remote.kind, remoteHost: remote.host, messages };
   }
   const resolved = path.resolve(file);
