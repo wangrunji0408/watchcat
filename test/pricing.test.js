@@ -11,6 +11,7 @@ const {
   detailHermesRows,
   detailOpenClaw,
   extractThinkingEffort,
+  includeSubagentCosts,
   normalizeModelName,
   normalizedUsage,
   priceForModel,
@@ -20,6 +21,30 @@ const {
   summarizeOpenClaw,
   summarizeUsageRecords,
 } = require('../server');
+
+test('recursively includes subagent usage and cost in parent sessions', () => {
+  const usage = (inputTokens) => ({ inputTokens, cachedInputTokens: 0, cacheWriteTokens: 0,
+    cacheWrite1hTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: inputTokens, requests: 1 });
+  const sessions = [
+    { file: '/parent', sessionKind: 'agent', models: ['parent-model'], usage: usage(100),
+      cost: { usd: 1, complete: true, unknownModels: [] } },
+    { file: '/child', parentFile: '/parent', sessionKind: 'subagent', models: ['child-model'], usage: usage(20),
+      cost: { usd: .2, complete: true, unknownModels: [] } },
+    { file: '/grandchild', parentFile: '/child', sessionKind: 'subagent', models: ['unknown-model'], usage: usage(3),
+      cost: { usd: null, complete: false, unknownModels: ['unknown-model'] } },
+  ];
+
+  const [parent, child] = includeSubagentCosts(sessions);
+  assert.equal(parent.usage.inputTokens, 123);
+  assert.equal(parent.cost.usd, 1.2);
+  assert.equal(parent.cost.complete, false);
+  assert.deepEqual(parent.cost.unknownModels, ['unknown-model']);
+  assert.equal(parent.subagentCount, 2);
+  assert.equal(parent.subagentCost.usd, .2);
+  assert.deepEqual(parent.models, ['parent-model', 'child-model', 'unknown-model']);
+  assert.equal(child.usage.inputTokens, 23);
+  assert.equal(sessions[0].usage.inputTokens, 100);
+});
 
 test('renders Hermes file and terminal tool calls with paired results', () => {
   const rows = [

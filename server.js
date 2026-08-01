@@ -1679,6 +1679,81 @@ function detailOpenClaw(file, content) {
 
 let subagentSessionsByParentFile = new Map();
 
+const SUMMARY_USAGE_KEYS = [
+  'inputTokens', 'cachedInputTokens', 'cacheWriteTokens', 'cacheWrite1hTokens',
+  'outputTokens', 'reasoningTokens', 'totalTokens', 'requests',
+];
+
+function mergeSummaryUsage(...items) {
+  const present = items.filter(Boolean);
+  if (!present.length) return null;
+  return Object.fromEntries(SUMMARY_USAGE_KEYS.map(key => [key,
+    present.reduce((total, usage) => total + Number(usage[key] || 0), 0)]));
+}
+
+function mergeSummaryCosts(...items) {
+  const present = items.filter(Boolean);
+  if (!present.length) return null;
+  let usd = 0, hasPricedCost = false;
+  const unknownModels = new Set();
+  for (const cost of present) {
+    if (cost.usd != null) {
+      usd += Number(cost.usd) || 0;
+      hasPricedCost = true;
+    }
+    for (const model of cost.unknownModels || []) unknownModels.add(model);
+  }
+  return {
+    usd: hasPricedCost ? usd : null,
+    currency: 'USD',
+    complete: present.every(cost => cost.complete),
+    unknownModels: [...unknownModels],
+  };
+}
+
+// Session 列表隐藏 subagent，因此将所有后代的用量和成本递归汇总到可见的父会话。
+// 返回新对象，避免 apiStats 再读取缓存摘要时发生重复累计。
+function includeSubagentCosts(sessions) {
+  const childrenByParent = new Map();
+  for (const session of sessions) {
+    if (session.sessionKind !== 'subagent' || !session.parentFile) continue;
+    if (!childrenByParent.has(session.parentFile)) childrenByParent.set(session.parentFile, []);
+    childrenByParent.get(session.parentFile).push(session);
+  }
+
+  const memo = new Map();
+  function aggregate(session, ancestors = new Set()) {
+    if (memo.has(session)) return memo.get(session);
+    if (ancestors.has(session.file)) return { ...session };
+    const nextAncestors = new Set(ancestors).add(session.file);
+    const children = (childrenByParent.get(session.file) || []).map(child => aggregate(child, nextAncestors));
+    if (!children.length) {
+      const copy = { ...session };
+      memo.set(session, copy);
+      return copy;
+    }
+
+    const subagentUsage = mergeSummaryUsage(...children.map(child => child.usage));
+    const subagentCost = mergeSummaryCosts(...children.map(child => child.cost));
+    const models = new Set([...(session.models || []), ...children.flatMap(child => child.models || [])]);
+    const copy = {
+      ...session,
+      models: [...models],
+      ownUsage: session.usage,
+      ownCost: session.cost,
+      usage: mergeSummaryUsage(session.usage, subagentUsage),
+      cost: mergeSummaryCosts(session.cost, subagentCost),
+      subagentUsage,
+      subagentCost,
+      subagentCount: children.reduce((total, child) => total + 1 + Number(child.subagentCount || 0), 0),
+    };
+    memo.set(session, copy);
+    return copy;
+  }
+
+  return sessions.map(session => aggregate(session));
+}
+
 function subagentLink(summary) {
   return {
     source: summary.source,
@@ -1796,15 +1871,16 @@ async function collectSessions() {
 
 async function apiSessions() {
   const { sessions, remote } = await collectSessions();
+  const aggregatedSessions = includeSubagentCosts(sessions);
 
   const nextSubagentIndex = new Map();
-  for (const s of sessions) {
+  for (const s of aggregatedSessions) {
     if (s.sessionKind !== 'subagent' || !s.parentFile) continue;
     if (!nextSubagentIndex.has(s.parentFile)) nextSubagentIndex.set(s.parentFile, []);
     nextSubagentIndex.get(s.parentFile).push(s);
   }
   subagentSessionsByParentFile = nextSubagentIndex;
-  const listedSessions = sessions.filter(s => s.sessionKind !== 'subagent');
+  const listedSessions = aggregatedSessions.filter(s => s.sessionKind !== 'subagent');
 
   // 按项目 (cwd) 分组
   const groups = new Map();
@@ -2009,6 +2085,7 @@ module.exports = {
   extractThinkingEffort,
   normalizeModelName,
   normalizedUsage,
+  includeSubagentCosts,
   parseRemoteScan,
   priceForModel,
   remoteAgentSessions,
