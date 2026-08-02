@@ -642,7 +642,8 @@ function summarizeDsh(file, stat, content) {
       contextTokens = null;
     } else if (l.type === 'user/message') {
       const text = extractText(d.content);
-      if (text && !isNoiseUserText(text) && !isDshCompactionMessage(text)) {
+      if (text && !parseDshBackgroundTask(d) && !parseDshGoalEvent(d) && !parseDshRuntimeContext(d) &&
+          !isNoiseUserText(text) && !isDshCompactionMessage(text)) {
         userCount++;
         if (!firstUserText) firstUserText = text;
         bumpDate(activityByDay, ts);
@@ -1410,8 +1411,8 @@ function detailHermes(sessionId) {
   const db = getHermesDb();
   if (!db) throw httpError(404, 'hermes db unavailable');
   const rows = db.prepare(`
-    SELECT role, content, tool_call_id, tool_name, tool_calls, reasoning, timestamp
-    FROM messages WHERE session_id = ? ORDER BY timestamp, id
+    SELECT role, content, tool_call_id, tool_name, tool_calls, reasoning, timestamp, active
+    FROM messages WHERE session_id = ? AND active = 1 ORDER BY timestamp, id
   `).all(sessionId);
   return detailHermesRows(rows);
 }
@@ -1430,11 +1431,27 @@ function hermesToolResultText(name, content) {
   return JSON.stringify(parsed, null, 2);
 }
 
+function hermesCompactionSummary(content) {
+  if (typeof content !== 'string') return null;
+  if (content.startsWith('[CONTEXT SUMMARY]:')) {
+    return content.slice('[CONTEXT SUMMARY]:'.length).trim();
+  }
+  if (!content.startsWith('[CONTEXT COMPACTION')) return null;
+  const summaryStart = content.indexOf('\n');
+  return summaryStart < 0 ? '' : content.slice(summaryStart + 1).trim();
+}
+
 function detailHermesRows(rows) {
   const msgs = [];
   for (const r of rows) {
+    // Hermes keeps pre-compaction rows as inactive archive copies. They may
+    // share the same timestamp and content with the new active transcript.
+    if (r.active === 0) continue;
     const ts = r.timestamp ? new Date(r.timestamp * 1000).toISOString() : null;
-    if (r.role === 'user' && r.content) {
+    const compactionSummary = hermesCompactionSummary(r.content);
+    if (compactionSummary != null) {
+      msgs.push({ role: 'compaction', summary: compactionSummary, ts });
+    } else if (r.role === 'user' && r.content) {
       msgs.push({ role: 'user', text: r.content, ts });
     } else if (r.role === 'assistant') {
       if (r.reasoning) msgs.push({ role: 'thinking', text: truncate(r.reasoning, 600), ts });
@@ -1740,6 +1757,49 @@ function parseDshBackgroundTask(message) {
   };
 }
 
+function parseDshGoalEvent(message) {
+  if (!message || message.source?.kind !== 'goal') return null;
+  const source = message.source;
+  const text = extractText(message.content);
+  const change = source.change;
+  if (change && change.goal) {
+    const goal = change.goal;
+    const reason = goal.blockedReason;
+    return {
+      role: 'goal',
+      event: change.operation || goal.phase || 'updated',
+      goalId: goal.id || source.goalId || null,
+      objective: goal.objective || null,
+      phase: goal.phase || null,
+      round: source.round ?? null,
+      maxRounds: goal.maxGoalRounds ?? null,
+      reason: typeof reason === 'string' ? reason : reason?.message || null,
+      text,
+    };
+  }
+  const objectiveMatch = text.match(/<goal_round>\s*Objective:\s*"([\s\S]*?)"\s*\nRound:/i);
+  const roundMatch = text.match(/\nRound:\s*(\d+)\s*\/\s*(\d+)/i);
+  let objective = objectiveMatch ? objectiveMatch[1] : null;
+  if (objective) {
+    try { objective = JSON.parse(`"${objective}"`); } catch { /* 保留原始文本 */ }
+  }
+  return {
+    role: 'goal', event: 'round', goalId: source.goalId || null, objective,
+    phase: null,
+    round: source.round ?? (roundMatch ? Number(roundMatch[1]) : null),
+    maxRounds: roundMatch ? Number(roundMatch[2]) : null,
+    reason: null,
+    text,
+  };
+}
+
+function parseDshRuntimeContext(message) {
+  if (!message || message.source?.kind !== 'plugin' ||
+      message.source.plugin !== '@deepseek-ai/dsh-system-prompt') return null;
+  const text = extractText(message.content);
+  return text ? { role: 'runtime_context', text } : null;
+}
+
 function detailDsh(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
@@ -1786,7 +1846,13 @@ function detailDsh(file, content) {
     } else if (l.type === 'user/message') {
       const value = extractText(d.content);
       const backgroundTask = parseDshBackgroundTask(d);
-      if (backgroundTask) {
+      const goalEvent = parseDshGoalEvent(d);
+      const runtimeContext = parseDshRuntimeContext(d);
+      if (runtimeContext) {
+        msgs.push({ ...runtimeContext, ts });
+      } else if (goalEvent) {
+        msgs.push({ ...goalEvent, ts });
+      } else if (backgroundTask) {
         msgs.push({ ...backgroundTask, ts });
       } else if (value && !isNoiseUserText(value) && !isDshCompactionMessage(value)) {
         msgs.push({ role: 'user', text: value, ts });

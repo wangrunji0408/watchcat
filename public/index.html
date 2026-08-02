@@ -279,6 +279,9 @@ const MESSAGES = {
     runningCount: '{n} running', sessions: '{n} sessions', projectsSummary: '{projects} projects · {sessions} sessions', sshErrors: 'SSH errors', noSessions: 'No session logs found',
     model: 'Model {name}', thinkingEffort: 'Thinking effort {value}', user: 'User', assistant: 'Assistant', agentStarted: 'Agent started', agentCompleted: 'Agent completed',
     backgroundTaskCompleted: 'Background task completed', backgroundTaskStatus: 'Background task: {status}', exitCode: 'exit {code}',
+    goalCreated: 'Goal created', goalCompleted: 'Goal completed', goalBlocked: 'Goal blocked', goalPaused: 'Goal paused',
+    goalResumed: 'Goal resumed', goalUpdated: 'Goal updated', goalRound: 'Goal round {round}', blockedReason: 'Blocked: {reason}',
+    runtimeContext: 'Runtime context',
     agentFailed: 'Agent failed', agentTimeout: 'Agent timed out', agentCancelled: 'Agent cancelled', agentAborted: 'Agent aborted', agentStatus: 'Agent status',
     viewSubagent: 'View subagent log', automatic: 'automatic', manual: 'manual', beforeCompaction: '{n} tokens before compaction', compacted: 'Context compacted',
     noMessages: 'No messages to display', loadFailed: 'Failed to load: {error}', jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun',
@@ -302,6 +305,9 @@ const MESSAGES = {
     runningCount: '{n} 运行', sessions: '{n} 会话', projectsSummary: '{projects} 项目 · {sessions} 会话', sshErrors: 'SSH 异常', noSessions: '没有找到任何会话日志',
     model: '模型 {name}', thinkingEffort: '思考强度 {value}', user: '用户', assistant: '助手', agentStarted: 'Agent 已创建', agentCompleted: 'Agent 完成',
     backgroundTaskCompleted: '后台任务已完成', backgroundTaskStatus: '后台任务：{status}', exitCode: '退出码 {code}',
+    goalCreated: '目标已创建', goalCompleted: '目标已完成', goalBlocked: '目标受阻', goalPaused: '目标已暂停',
+    goalResumed: '目标已恢复', goalUpdated: '目标已更新', goalRound: '目标轮次 {round}', blockedReason: '受阻原因：{reason}',
+    runtimeContext: '运行环境',
     agentFailed: 'Agent 失败', agentTimeout: 'Agent 超时', agentCancelled: 'Agent 已取消', agentAborted: 'Agent 已中止', agentStatus: 'Agent 状态',
     viewSubagent: '点击查看 subagent 记录', automatic: '自动', manual: '手动', beforeCompaction: '压缩前 {n} tokens', compacted: '上下文已压缩',
     noMessages: '没有可显示的消息', loadFailed: '加载失败：{error}', jan: '1月', feb: '2月', mar: '3月', apr: '4月', may: '5月', jun: '6月',
@@ -1382,6 +1388,47 @@ async function openSession(s, keepScroll) {
         card.appendChild(el('div', 'subagent-card-sub', details.join(' · ') || m.text || ''));
         if (m.subagent) card.onclick = () => openSubagent(m.subagent);
         box.appendChild(card);
+        main.appendChild(box);
+        i++;
+        continue;
+      }
+      if (m.role === 'goal') {
+        const eventNames = {
+          create: t('goalCreated'), complete: t('goalCompleted'), block: t('goalBlocked'),
+          pause: t('goalPaused'), resume: t('goalResumed'), edit: t('goalUpdated'), updated: t('goalUpdated'),
+        };
+        const round = m.round == null ? '' : String(m.round) + (m.maxRounds == null ? '' : '/' + m.maxRounds);
+        const label = (m.event === 'round' ? t('goalRound', { round }) : eventNames[m.event] || t('goalUpdated')) +
+          (m.ts ? ' · ' + fmtTime(m.ts) : '');
+        if (m.event === 'create') {
+          const box = el('div', 'msg assistant');
+          box.appendChild(el('div', 'meta', label));
+          if (m.objective) box.appendChild(renderMarkdown(m.objective));
+          main.appendChild(box);
+          i++;
+          continue;
+        }
+        const box = expandable('details', 'msg compaction', s.file + ':goal:' + i);
+        const summary = el('summary', 'compaction-summary');
+        summary.appendChild(el('span', 'compaction-label', label));
+        box.appendChild(summary);
+        const content = el('div', 'compaction-content');
+        if (m.objective) content.appendChild(renderMarkdown(m.objective, 'markdown-body'));
+        if (m.reason) content.appendChild(el('div', 'tool-detail-value', t('blockedReason', { reason: m.reason })));
+        box.appendChild(content);
+        main.appendChild(box);
+        i++;
+        continue;
+      }
+      if (m.role === 'runtime_context') {
+        const label = t('runtimeContext') + (m.ts ? ' · ' + fmtTime(m.ts) : '');
+        const box = expandable('details', 'msg compaction', s.file + ':runtime-context:' + i);
+        const summary = el('summary', 'compaction-summary');
+        summary.appendChild(el('span', 'compaction-label', label));
+        box.appendChild(summary);
+        const content = el('div', 'compaction-content');
+        content.appendChild(renderMarkdown(m.text, 'markdown-body'));
+        box.appendChild(content);
         main.appendChild(box);
         i++;
         continue;

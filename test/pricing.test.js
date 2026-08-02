@@ -88,6 +88,33 @@ test('renders Hermes read_file and patch calls using structured views', () => {
   assert.equal(detail[2].readContent, '# title\n');
 });
 
+test('renders Hermes context summaries as compaction events', () => {
+  const prefix = '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below:';
+  const rows = [
+    { role: 'user', content: `${prefix}\n## Checkpoint\n\nContinue here.`, timestamp: 1 },
+    { role: 'assistant', content: '[CONTEXT SUMMARY]: Legacy checkpoint', timestamp: 2 },
+    { role: 'user', content: 'actual request', timestamp: 3 },
+  ];
+
+  const detail = detailHermesRows(rows);
+  assert.deepEqual(detail.map(message => message.role), ['compaction', 'compaction', 'user']);
+  assert.equal(detail[0].summary, '## Checkpoint\n\nContinue here.');
+  assert.equal(detail[1].summary, 'Legacy checkpoint');
+  assert.equal(detail[2].text, 'actual request');
+});
+
+test('does not render inactive Hermes compaction archive copies', () => {
+  const rows = [
+    { role: 'user', content: 'preserved request', timestamp: 1, active: 0, compacted: 1 },
+    { role: 'user', content: 'preserved request', timestamp: 1, active: 1, compacted: 0 },
+    { role: 'assistant', content: 'preserved response', timestamp: 2, active: 0, compacted: 1 },
+    { role: 'assistant', content: 'preserved response', timestamp: 2, active: 1, compacted: 0 },
+  ];
+
+  const detail = detailHermesRows(rows);
+  assert.deepEqual(detail.map(message => message.text), ['preserved request', 'preserved response']);
+});
+
 test('parses DeepSeek Harness summaries and message details', () => {
   const rows = [
     { type: 'session', id: 'session-1', createdAt: 1785515761653, cwd: '/tmp/dsh-project' },
@@ -196,6 +223,49 @@ test('renders DeepSeek Harness background task completions as task events', () =
   assert.equal(detail[0].command, 'npm test');
   assert.equal(detail[0].exitCode, 0);
   assert.equal(detail[1].role, 'user');
+});
+
+test('renders DeepSeek Harness goal updates as events and excludes them from user turns', () => {
+  const goal = {
+    id: 'goal-example', revision: 2, objective: 'Ship the example', phase: 'blocked', maxGoalRounds: 8,
+    blockedReason: { code: 'example-error', message: 'Example dependency unavailable' },
+  };
+  const rows = [
+    { type: 'session', id: 'session-goal', createdAt: 1785515761000, cwd: '/tmp/project' },
+    { type: 'user/message', time: 1785515762000, data: {
+      content: [{ type: 'text', text: '<goal_state>{"example":true}</goal_state>' }],
+      source: { kind: 'goal', goalId: goal.id, revision: 2, round: 0,
+        change: { kind: 'goal/change', operation: 'block', goal } },
+    } },
+    { type: 'user/message', time: 1785515763000, data: {
+      content: [{ type: 'text', text: '<goal_round>\nObjective: "Ship the example"\nRound: 3/8\n</goal_round>' }],
+      source: { kind: 'goal', goalId: goal.id, revision: 2, round: 3 },
+    } },
+    { type: 'user/message', time: 1785515763500, data: {
+      content: [{ type: 'text', text: 'Runtime policy snapshot with revised wording.' }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
+    } },
+    { type: 'user/message', time: 1785515764000,
+      data: { content: [{ type: 'text', text: 'continue the work' }] } },
+    { type: 'assistant/message', time: 1785515765000, data: {
+      message: { source: { model: 'deepseek-v4-flash' }, content: [{ type: 'text', text: 'working' }] },
+      usage: { inputTokens: 10, outputTokens: 2 },
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const detail = detailDsh('/tmp/session.jsonl.zstd', content);
+  const summary = summarizeDsh('/tmp/session.jsonl.zstd', { size: content.length }, content);
+
+  assert.deepEqual(detail.map(message => message.role), ['goal', 'goal', 'runtime_context', 'user', 'assistant']);
+  assert.equal(detail[0].event, 'block');
+  assert.equal(detail[0].objective, 'Ship the example');
+  assert.equal(detail[0].reason, 'Example dependency unavailable');
+  assert.equal(detail[1].event, 'round');
+  assert.equal(detail[1].round, 3);
+  assert.equal(detail[1].maxRounds, 8);
+  assert.equal(detail[2].text, 'Runtime policy snapshot with revised wording.');
+  assert.equal(summary.turns, 2);
+  assert.equal(summary.title, 'continue the work');
 });
 
 test('extracts Codex thinking effort from turn context', () => {
