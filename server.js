@@ -240,6 +240,8 @@ function summarizeDailyRecords(records) {
       date,
       model: model || null,
       usd: cost ? cost.usd : null,
+      // 统计页的 Token 用量口径：仅未缓存输入 + 输出，不包含缓存读写。
+      tokenUsage: usage ? usage.inputTokens + usage.outputTokens : 0,
       totalTokens: usage ? usage.totalTokens : 0,
       requests: usage ? usage.requests : 0,
     });
@@ -335,7 +337,9 @@ function isNoiseUserText(text) {
 function extractText(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content.filter(c => c && c.type === 'text').map(c => c.text).join('\n');
+    return content
+      .filter(c => c && ['text', 'input_text', 'output_text'].includes(c.type) && typeof c.text === 'string')
+      .map(c => c.text).join('\n');
   }
   return '';
 }
@@ -536,6 +540,7 @@ function summarizeCodex(file, stat, content) {
   let thinkingEffort = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
   let userCount = 0, agentCount = 0, contextTokens = null;
+  const contextPeaks = [];
   const models = new Set();
   const usageRecords = [];
   const activityByDay = new Map();
@@ -560,6 +565,15 @@ function summarizeCodex(file, stat, content) {
       thinkingEffort = p.effort || p.reasoning_effort ||
         p.collaboration_mode && p.collaboration_mode.settings && p.collaboration_mode.settings.reasoning_effort ||
         thinkingEffort;
+    }
+    const compaction = codexCompactionDetails(l);
+    // context_compacted is the completion notification for the preceding
+    // compacted record. Its token count is the post-compaction context, not a
+    // second compaction boundary.
+    if (compaction && compaction.eventType !== 'context_compacted') {
+      const beforeTokens = compaction.beforeTokens ?? contextTokens;
+      if (beforeTokens != null) contextPeaks.push(beforeTokens);
+      contextTokens = compaction.afterTokens;
     }
     if (l.type === 'event_msg') {
       if (p.type === 'user_message' && p.message) {
@@ -601,6 +615,7 @@ function summarizeCodex(file, stat, content) {
     models: [...models],
     thinkingEffort,
     contextTokens,
+    contextPeaks,
     usage: totals.usage,
     cost: totals.cost,
     sizeBytes: stat.size,
@@ -1683,26 +1698,74 @@ function detailClaude(file, content) {
   return msgs;
 }
 
+function codexCompactionDetails(line) {
+  const payload = line.payload || {};
+  const eventType = line.type === 'event_msg' ? payload.type : line.type;
+  if (!['compacted', 'compaction', 'context_compacted'].includes(eventType)) return null;
+  const details = payload.info || payload;
+  const number = (...values) => {
+    const value = values.find(v => v != null && v !== '');
+    if (value == null) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const summaryValue = details.summary ?? details.message ?? details.compacted_summary;
+  const summary = typeof summaryValue === 'string' ? summaryValue
+    : extractText(summaryValue) || extractText(summaryValue && summaryValue.content) ||
+      (summaryValue && typeof summaryValue.text === 'string' ? summaryValue.text : '');
+  return {
+    eventType,
+    trigger: details.trigger || null,
+    beforeTokens: number(details.pre_tokens, details.preTokens, details.tokens_before, details.tokensBefore),
+    afterTokens: number(details.post_tokens, details.postTokens, details.tokens_after, details.tokensAfter),
+    durationMs: number(details.duration_ms, details.durationMs),
+    summary: summary.trim(),
+  };
+}
+
 function detailCodex(file, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
   const readCalls = new Set();
+  let contextTokens = null;
+  let pendingCompaction = null;
   for (const l of lines) {
     const p = l.payload || {};
-    if (l.type === 'compacted' || l.type === 'compaction' ||
-        (l.type === 'event_msg' && (p.type === 'compacted' || p.type === 'compaction'))) {
-      const details = p.info || p;
-      msgs.push({
+    const compaction = codexCompactionDetails(l);
+    if (compaction) {
+      if (compaction.eventType === 'context_compacted') {
+        if (pendingCompaction) {
+          pendingCompaction.afterTokens = compaction.afterTokens ?? contextTokens;
+          pendingCompaction.trigger ||= compaction.trigger;
+          pendingCompaction.durationMs ??= compaction.durationMs;
+          pendingCompaction.summary ||= compaction.summary;
+          pendingCompaction = null;
+        }
+        continue;
+      }
+      const message = {
         role: 'compaction', ts: l.timestamp,
-        trigger: details.trigger || null,
-        beforeTokens: details.pre_tokens ?? details.preTokens ?? details.tokens_before ?? null,
-        afterTokens: details.post_tokens ?? details.postTokens ?? details.tokens_after ?? null,
-        durationMs: details.duration_ms ?? details.durationMs ?? null,
-      });
+        trigger: compaction.trigger,
+        beforeTokens: compaction.beforeTokens ?? contextTokens,
+        afterTokens: compaction.afterTokens,
+        durationMs: compaction.durationMs,
+        summary: compaction.summary,
+      };
+      msgs.push(message);
+      pendingCompaction = message;
+      contextTokens = compaction.afterTokens;
     } else if (l.type === 'event_msg') {
-      if (p.type === 'user_message' && p.message) msgs.push({ role: 'user', text: p.message, ts: l.timestamp });
-      else if (p.type === 'agent_message' && p.message) msgs.push({ role: 'assistant', text: p.message, ts: l.timestamp });
+      if (p.type === 'user_message' && p.message) {
+        pendingCompaction = null;
+        msgs.push({ role: 'user', text: p.message, ts: l.timestamp });
+      } else if (p.type === 'agent_message' && p.message) {
+        pendingCompaction = null;
+        msgs.push({ role: 'assistant', text: p.message, ts: l.timestamp });
+      }
       else if (p.type === 'agent_reasoning' && p.text) msgs.push({ role: 'thinking', text: truncate(p.text, 600), ts: l.timestamp });
+      else if (p.type === 'token_count' && p.info && p.info.last_token_usage) {
+        contextTokens = Number(p.info.last_token_usage.total_tokens) || contextTokens;
+      }
     } else if (l.type === 'response_item') {
       if (p.type === 'function_call' || p.type === 'custom_tool_call') {
         const raw = p.arguments ?? p.input ?? '';
@@ -1712,10 +1775,11 @@ function detailCodex(file, content) {
         msgs.push({ role: 'tool_use', ts: l.timestamp, toolName: p.name || '?', callId: p.call_id || null,
           input, ...renderData, text: (p.name || '?') + ' ' + input });
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
-        const out = typeof p.output === 'string' ? p.output : (p.output && p.output.content) || JSON.stringify(p.output || '');
+        const out = extractText(p.output) || extractText(p.output && p.output.content) ||
+          JSON.stringify(p.output || '');
         const rawOutput = String(out);
         const isRead = p.call_id && readCalls.has(p.call_id);
-        const output = isRead ? rawOutput : truncate(rawOutput, 600);
+        const output = isRead ? rawOutput : truncateBlock(rawOutput, 600);
         msgs.push({ role: 'tool_result', ts: l.timestamp, callId: p.call_id || null, output, text: output,
           ...(isRead ? { readContent: rawOutput } : {}) });
       }
@@ -2036,6 +2100,7 @@ function subagentLink(summary) {
     models: summary.models,
     thinkingEffort: summary.thinkingEffort || null,
     contextTokens: summary.contextTokens,
+    contextPeaks: summary.contextPeaks || [],
     usage: summary.usage,
     cost: summary.cost,
     status: summary.status,
@@ -2206,15 +2271,15 @@ async function apiSessions() {
   };
 }
 
-// 统计页聚合:按天 × 模型成本、模型总成本、每日活跃度、按天 × 项目成本。
+// 统计页聚合:按天 × 模型成本/Token、模型总量、每日活跃度、按天 × 项目成本/Token。
 // 全部维度都按天输出,前端的时间范围筛选对四张图同时生效且数字一致。
 async function apiStats() {
   const { sessions } = await collectSessions();
 
-  const dailyByModel = new Map(); // date\0modelName -> { usd, totalTokens, requests }
-  const byModel = new Map(); // modelName -> { usd, totalTokens, requests }
+  const dailyByModel = new Map(); // date\0modelName -> { usd, tokenUsage, totalTokens, requests }
+  const byModel = new Map(); // modelName -> { usd, tokenUsage, totalTokens, requests }
   const activityByDay = new Map(); // date -> { turns, sessions }
-  const projectByDay = new Map(); // date\0project -> usd
+  const projectByDay = new Map(); // date\0project -> { usd, tokenUsage }
   const unknownModels = new Set();
 
   for (const s of sessions) {
@@ -2225,18 +2290,24 @@ async function apiStats() {
       if (!price && d.model) unknownModels.add(d.model);
       const usd = d.usd || 0;
       const key = d.date + '\0' + name;
-      const day = dailyByModel.get(key) || { date: d.date, model: name, usd: 0, totalTokens: 0, requests: 0 };
+      const tokenUsage = d.tokenUsage || 0;
+      const day = dailyByModel.get(key) || { date: d.date, model: name, usd: 0, tokenUsage: 0, totalTokens: 0, requests: 0 };
       day.usd += usd;
+      day.tokenUsage += tokenUsage;
       day.totalTokens += d.totalTokens || 0;
       day.requests += d.requests || 0;
       dailyByModel.set(key, day);
-      const m = byModel.get(name) || { model: name, usd: 0, totalTokens: 0, requests: 0, priced: !!price };
+      const m = byModel.get(name) || { model: name, usd: 0, tokenUsage: 0, totalTokens: 0, requests: 0, priced: !!price };
       m.usd += usd;
+      m.tokenUsage += tokenUsage;
       m.totalTokens += d.totalTokens || 0;
       m.requests += d.requests || 0;
       byModel.set(name, m);
       const pk = d.date + '\0' + project;
-      projectByDay.set(pk, (projectByDay.get(pk) || 0) + usd);
+      const projectDay = projectByDay.get(pk) || { usd: 0, tokenUsage: 0 };
+      projectDay.usd += usd;
+      projectDay.tokenUsage += tokenUsage;
+      projectByDay.set(pk, projectDay);
     }
     for (const a of s.activity || []) {
       const day = activityByDay.get(a.date) || { date: a.date, turns: 0, sessions: 0 };
@@ -2250,10 +2321,10 @@ async function apiStats() {
     a.date.localeCompare(b.date) || b.usd - a.usd);
   const models = [...byModel.values()].sort((a, b) => b.usd - a.usd);
   const activity = [...activityByDay.values()].sort((a, b) => a.date.localeCompare(b.date));
-  const projectDaily = [...projectByDay.entries()].map(([key, usd]) => {
+  const projectDaily = [...projectByDay.entries()].map(([key, value]) => {
     const [date, project] = key.split('\0');
     return {
-      date, project, usd,
+      date, project, ...value,
       name: project.startsWith(HOME) ? '~' + project.slice(HOME.length) : project,
     };
   }).sort((a, b) => a.date.localeCompare(b.date));

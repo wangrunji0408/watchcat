@@ -391,7 +391,23 @@ test('splits usage records into per-day per-model cost buckets', () => {
   assert.deepEqual(daily.map(d => d.model), ['claude-fable-5', 'gpt-5.5']);
   assert.equal(daily[0].usd, 20); // 2M input @ $10/M
   assert.equal(daily[0].requests, 2);
+  assert.equal(daily[0].tokenUsage, 2_000_000);
   assert.ok(daily[0].date <= daily[1].date);
+});
+
+test('daily token usage includes input and output but excludes cache tokens', () => {
+  const { summarizeDailyRecords } = require('../server');
+  const usage = normalizedUsage({
+    input_tokens: 1_100,
+    cached_input_tokens: 900,
+    output_tokens: 50,
+  }, 'codex');
+  const [daily] = summarizeDailyRecords([
+    { model: 'gpt-5.5', usage, ts: '2026-07-21T08:00:00+08:00' },
+  ]);
+
+  assert.equal(daily.tokenUsage, 250);
+  assert.equal(daily.totalTokens, 1_150);
 });
 
 test('claude summaries expose daily cost and activity buckets', () => {
@@ -659,10 +675,12 @@ test('renders context compaction events from supported logs', () => {
 
   const codex = detailCodex('/tmp/session.jsonl', JSON.stringify({
     type: 'compacted', timestamp: '2026-07-18T00:01:00Z',
-    payload: { trigger: 'manual', tokens_before: 120000, tokens_after: 5000 },
+    payload: { trigger: 'manual', tokens_before: 120000, tokens_after: 5000,
+      message: '## Checkpoint\n\nContinue from here.' },
   }));
   assert.equal(codex[0].role, 'compaction');
   assert.equal(codex[0].beforeTokens, 120000);
+  assert.equal(codex[0].summary, '## Checkpoint\n\nContinue from here.');
 
   const openClaw = detailOpenClaw('/tmp/session.jsonl', JSON.stringify({
     type: 'compaction', timestamp: '2026-07-18T00:02:00Z', fromHook: true, tokensBefore: 190000,
@@ -670,4 +688,77 @@ test('renders context compaction events from supported logs', () => {
   assert.equal(openClaw[0].role, 'compaction');
   assert.equal(openClaw[0].trigger, 'auto');
   assert.equal(openClaw[0].beforeTokens, 190000);
+});
+
+test('merges Codex compaction completion notifications into their compacted summaries', () => {
+  const rows = [
+    { type: 'session_meta', timestamp: '2026-07-18T00:00:00Z', payload: {
+      id: 'session-context', cwd: '/tmp/example-project', originator: 'Codex CLI',
+    } },
+    { type: 'turn_context', timestamp: '2026-07-18T00:00:01Z', payload: { model: 'gpt-5.5' } },
+    { type: 'event_msg', timestamp: '2026-07-18T00:00:02Z', payload: {
+      type: 'user_message', message: 'Build a fictional example.',
+    } },
+    { type: 'event_msg', timestamp: '2026-07-18T00:01:00Z', payload: {
+      type: 'token_count', info: { last_token_usage: { total_tokens: 120000 } },
+    } },
+    { type: 'compacted', timestamp: '2026-07-18T00:01:01Z', payload: {
+      message: 'First synthetic checkpoint.',
+    } },
+    { type: 'event_msg', timestamp: '2026-07-18T00:01:02Z', payload: {
+      type: 'token_count', info: { last_token_usage: { total_tokens: 7000 } },
+    } },
+    { type: 'event_msg', timestamp: '2026-07-18T00:01:03Z', payload: {
+      type: 'context_compacted',
+    } },
+    { type: 'event_msg', timestamp: '2026-07-18T00:02:00Z', payload: {
+      type: 'token_count', info: { last_token_usage: { total_tokens: 83000 } },
+    } },
+    { type: 'compacted', timestamp: '2026-07-18T00:02:01Z', payload: {
+      message: 'Second synthetic checkpoint.',
+    } },
+    { type: 'event_msg', timestamp: '2026-07-18T00:03:00Z', payload: {
+      type: 'token_count', info: { last_token_usage: { total_tokens: 14000 } },
+    } },
+    { type: 'event_msg', timestamp: '2026-07-18T00:03:00Z', payload: {
+      type: 'context_compacted',
+    } },
+    { type: 'event_msg', timestamp: '2026-07-18T00:03:01Z', payload: {
+      type: 'agent_message', message: 'Finished.',
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeCodex('/tmp/session.jsonl', { size: content.length }, content);
+  const detail = detailCodex('/tmp/session.jsonl', content).filter(message => message.role === 'compaction');
+
+  assert.deepEqual(summary.contextPeaks, [120000, 83000]);
+  assert.equal(summary.contextTokens, 14000);
+  assert.deepEqual(detail.map(message => message.beforeTokens), [120000, 83000]);
+  assert.deepEqual(detail.map(message => message.afterTokens), [7000, 14000]);
+  assert.deepEqual(detail.map(message => message.summary), [
+    'First synthetic checkpoint.', 'Second synthetic checkpoint.',
+  ]);
+});
+
+test('extracts text blocks from Codex custom tool call outputs', () => {
+  const rows = [
+    {
+      type: 'response_item', timestamp: '2026-07-18T00:00:00Z',
+      payload: { type: 'custom_tool_call', name: 'example_tool', call_id: 'call-example', input: '{}' },
+    },
+    {
+      type: 'response_item', timestamp: '2026-07-18T00:00:01Z',
+      payload: {
+        type: 'custom_tool_call_output', call_id: 'call-example',
+        output: [
+          { type: 'input_text', text: 'First output line' },
+          { type: 'output_text', text: 'Second output line' },
+        ],
+      },
+    },
+  ];
+  const detail = detailCodex('/tmp/example-session.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.equal(detail[1].role, 'tool_result');
+  assert.equal(detail[1].output, 'First output line\nSecond output line');
 });

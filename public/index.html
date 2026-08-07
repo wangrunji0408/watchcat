@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐱</text></svg>">
 <title>Watchcat · Agent Session Monitor</title>
 <style>
   :root {
@@ -169,6 +170,10 @@
     border-radius: 999px; padding: 3px 12px; font-size: 12.5px; cursor: pointer; }
   .stats-filter .range-btn:hover { color: var(--text); }
   .stats-filter .range-btn.active { color: var(--text); border-color: var(--accent); background: rgba(122,162,247,.12); }
+  .stats-filter .metric-toggle { display: inline-flex; margin-left: auto; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .stats-filter .metric-btn { background: transparent; color: var(--dim); border: 0; padding: 4px 12px; font-size: 12.5px; cursor: pointer; }
+  .stats-filter .metric-btn + .metric-btn { border-left: 1px solid var(--border); }
+  .stats-filter .metric-btn.active { color: var(--text); background: rgba(122,162,247,.16); }
   .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
   .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
   .kpi-label { color: var(--dim); font-size: 12px; }
@@ -269,12 +274,14 @@ const MESSAGES = {
     unknownPrice: 'Price unknown', missingPrice: 'No official API price for: {names}', noUsage: 'No billable token usage',
     priceEstimate: 'Estimated from published Standard API prices (USD)', input: 'Input', cacheRead: 'cache read', cacheWrite: 'cache write', output: 'output',
     excludesModels: 'Excludes unpriced models: {names}', includesSubagents: 'Includes {n} subagents · {cost}', tool: 'Tool', toolCalls: '{n} tool calls', thinking: 'Thinking', toolResult: 'Tool result',
-    toolUse: 'Tool call', noResult: '(No result yet)', other: 'Other', noCostData: 'No cost data for this period', noCost: 'No cost', total: 'Total',
-    totalCost: 'Total cost', turns: 'Message turns', activeSessions: 'Active sessions', less: 'Less', more: 'More',
+    toolUse: 'Tool call', noResult: '(No result yet)', other: 'Other', noCostData: 'No cost data for this period', noTokenData: 'No token usage for this period', noCost: 'No cost', noTokens: 'No tokens', total: 'Total',
+    totalCost: 'Total cost', tokenUsage: 'Token usage', costMode: 'Cost', tokenMode: 'Tokens', turns: 'Message turns', activeSessions: 'Active sessions', less: 'Less', more: 'More',
     remainingProjects: '{n} other projects · {cost}', back: '‹ Back', last7: 'Last 7 days', last30: 'Last 30 days', last90: 'Last 90 days', all: 'All',
+    remainingProjectsTokens: '{n} other projects · {tokens}',
     avgDailyCost: 'Avg. daily cost (active days)', activeDays: 'Active days', unknownPrices: 'Unpriced models (excluded): {names}',
     dailyCost: 'Daily cost', dailyCostSub: 'Estimated from Standard API prices, split by model', modelShare: 'Cost by model', modelShareSub: 'Cumulative model cost for the selected period',
     activity: 'Activity', activitySub: 'Daily user and assistant message turns (all sources)', projectTop: 'Top 10 projects by cost', projectTopSub: 'Cumulative cost by session project',
+    avgDailyTokens: 'Avg. daily tokens (active days)', dailyTokens: 'Daily token usage', dailyTokensSub: 'Input + output tokens, excluding cache hits', modelTokenShare: 'Tokens by model', modelTokenShareSub: 'Cumulative input + output tokens for the selected period', projectTokenTop: 'Top 10 projects by token usage', projectTokenTopSub: 'Cumulative input + output tokens by session project',
     statsLoadFailed: 'Failed to load stats: {error}', refreshFailed: 'Refresh failed: {error}', parentSession: 'Parent session: {id}', rounds: '{n} turns',
     runningCount: '{n} running', sessions: '{n} sessions', projectsSummary: '{projects} projects · {sessions} sessions', sshErrors: 'SSH errors', noSessions: 'No session logs found',
     model: 'Model {name}', thinkingEffort: 'Thinking effort {value}', user: 'User', assistant: 'Assistant', agentStarted: 'Agent started', agentCompleted: 'Agent completed',
@@ -295,12 +302,14 @@ const MESSAGES = {
     unknownPrice: '价格未知', missingPrice: '未收录官方 API 单价：{names}', noUsage: '没有可计算的 token 用量',
     priceEstimate: '按 Standard API 公开单价估算（USD）', input: '输入', cacheRead: '缓存读取', cacheWrite: '缓存写入', output: '输出',
     excludesModels: '不含未定价模型：{names}', includesSubagents: '包含 {n} 个 subagent · {cost}', tool: '工具', toolCalls: '调用了 {n} 次工具', thinking: '思考', toolResult: '工具结果',
-    toolUse: '工具调用', noResult: '（暂无结果）', other: '其他', noCostData: '所选时间内没有成本数据', noCost: '无成本', total: '合计',
-    totalCost: '总成本', turns: '消息轮次', activeSessions: '活跃会话', less: '少', more: '多',
+    toolUse: '工具调用', noResult: '（暂无结果）', other: '其他', noCostData: '所选时间内没有成本数据', noTokenData: '所选时间内没有 Token 用量', noCost: '无成本', noTokens: '无 Token', total: '合计',
+    totalCost: '总成本', tokenUsage: 'Token 用量', costMode: '成本', tokenMode: 'Token 用量', turns: '消息轮次', activeSessions: '活跃会话', less: '少', more: '多',
     remainingProjects: '其余 {n} 个项目合计 {cost}', back: '‹ 返回', last7: '近 7 天', last30: '近 30 天', last90: '近 90 天', all: '全部',
+    remainingProjectsTokens: '其余 {n} 个项目合计 {tokens}',
     avgDailyCost: '日均成本（活跃日）', activeDays: '活跃天数', unknownPrices: '未收录单价（不计成本）：{names}',
     dailyCost: '每日成本', dailyCostSub: '按 Standard API 单价估算，柱内按模型细分', modelShare: '模型成本占比', modelShareSub: '所选时间范围内各模型累计成本',
     activity: '活跃热力图', activitySub: '每日用户与助手消息轮次（所有来源）', projectTop: '项目成本 Top 10', projectTopSub: '按会话所属项目累计',
+    avgDailyTokens: '日均 Token（活跃日）', dailyTokens: '每日 Token 用量', dailyTokensSub: '仅统计输入 + 输出，不包含缓存命中', modelTokenShare: '模型 Token 占比', modelTokenShareSub: '所选时间范围内各模型输入 + 输出累计', projectTokenTop: '项目 Token 用量 Top 10', projectTokenTopSub: '按会话所属项目累计输入 + 输出',
     statsLoadFailed: '统计加载失败：{error}', refreshFailed: '刷新失败：{error}', parentSession: '父会话：{id}', rounds: '{n} 轮',
     runningCount: '{n} 运行', sessions: '{n} 会话', projectsSummary: '{projects} 项目 · {sessions} 会话', sshErrors: 'SSH 异常', noSessions: '没有找到任何会话日志',
     model: '模型 {name}', thinkingEffort: '思考强度 {value}', user: '用户', assistant: '助手', agentStarted: 'Agent 已创建', agentCompleted: 'Agent 完成',
@@ -330,6 +339,7 @@ const state = {
   data: null,
   statsOpen: false,
   statsRange: 30, // 天数;0 = 全部
+  statsMetric: 'cost',
   statsData: null,
   statsAt: 0,
 };
@@ -422,6 +432,12 @@ function fmtUsd(n) {
   if (n === 0) return '$0.00';
   if (n < 0.005) return '<$0.01';
   return '$' + n.toFixed(2);
+}
+function fmtTokens(n) {
+  if (n == null || !Number.isFinite(n)) return '';
+  return new Intl.NumberFormat(language === 'zh' ? 'zh-CN' : 'en', {
+    notation: 'compact', maximumFractionDigits: 1,
+  }).format(n);
 }
 function costText(cost) {
   if (!cost || cost.usd == null) return t('unknownPrice');
@@ -775,11 +791,12 @@ async function fetchStats() {
 }
 
 // 模型 → 颜色:按全量总成本排序固定分配,时间筛选不改变既有配色
-function modelColorMap(models) {
+function modelColorMap(models, metric) {
   const map = new Map();
   let slot = 0;
-  for (const m of models) {
-    if (m.usd > 0 && slot < SERIES_COLORS.length - 1) map.set(m.model, SERIES_COLORS[slot++]);
+  const sorted = [...models].sort((a, b) => (b[metric] || 0) - (a[metric] || 0));
+  for (const m of sorted) {
+    if (m[metric] > 0 && slot < SERIES_COLORS.length - 1) map.set(m.model, SERIES_COLORS[slot++]);
     else map.set(m.model, OTHER_COLOR);
   }
   return map;
@@ -811,15 +828,15 @@ function legendFor(card, entries) {
 }
 
 // 每日成本堆叠柱状图
-function drawDailyCost(card, daily, colorMap) {
+function drawDailyCost(card, daily, colorMap, metric, formatValue) {
   const byDay = new Map();
   for (const r of daily) {
     const name = displayModel(colorMap, r.model);
     if (!byDay.has(r.date)) byDay.set(r.date, new Map());
     const m = byDay.get(r.date);
-    m.set(name, (m.get(name) || 0) + r.usd);
+    m.set(name, (m.get(name) || 0) + (r[metric] || 0));
   }
-  if (!byDay.size) { card.appendChild(el('div', 'chart-sub', t('noCostData'))); return; }
+  if (!byDay.size) { card.appendChild(el('div', 'chart-sub', t(metric === 'usd' ? 'noCostData' : 'noTokenData'))); return; }
 
   // 连续日期轴(包含零成本的日子),从范围起点(或最早数据)到今天
   const dates = [...byDay.keys()].sort();
@@ -842,16 +859,16 @@ function drawDailyCost(card, daily, colorMap) {
   const height = plotH + m.top + m.bottom;
   const svg = svgEl('svg', { class: 'chart-svg', viewBox: `0 0 ${width} ${height}`, height });
 
-  const maxUsd = Math.max(...days.map(day =>
+  const maxValue = Math.max(...days.map(day =>
     [...(byDay.get(day) || new Map()).values()].reduce((a, b) => a + b, 0)));
-  const step = niceStep(maxUsd, 4);
-  const yMax = Math.max(step, Math.ceil(maxUsd / step) * step);
+  const step = niceStep(maxValue, 4);
+  const yMax = Math.max(step, Math.ceil(maxValue / step) * step);
   const y = v => m.top + plotH - (v / yMax) * plotH;
 
   for (let v = 0; v <= yMax + 1e-9; v += step) {
     svg.appendChild(svgEl('line', { class: v === 0 ? 'axis' : 'grid', x1: m.left, x2: width - m.right, y1: y(v), y2: y(v) }));
     const label = svgEl('text', { class: 'tick-label', x: m.left - 6, y: y(v) + 4, 'text-anchor': 'end' });
-    label.textContent = '$' + (step < 1 ? v.toFixed(1) : Math.round(v));
+    label.textContent = formatValue(v);
     svg.appendChild(label);
   }
 
@@ -887,12 +904,12 @@ function drawDailyCost(card, daily, colorMap) {
       const total = acc;
       showTip(e.clientX, e.clientY, tip => {
         tip.appendChild(el('div', 'tt-title', day));
-        if (!segs || !total) { tipRow(tip, null, t('noCost'), '$0'); return; }
+        if (!segs || !total) { tipRow(tip, null, t(metric === 'usd' ? 'noCost' : 'noTokens'), formatValue(0)); return; }
         for (const name of seriesNames) {
           const v = segs.get(name) || 0;
-          if (v > 0) tipRow(tip, seriesColorByName(colorMap, name), name, fmtUsd(v));
+          if (v > 0) tipRow(tip, seriesColorByName(colorMap, name), name, formatValue(v));
         }
-        tipRow(tip, null, t('total'), fmtUsd(total));
+        tipRow(tip, null, t('total'), formatValue(total));
       });
     };
     hit.addEventListener('pointermove', show);
@@ -912,14 +929,14 @@ function seriesColorByName(colorMap, name) {
 }
 
 // 模型成本占比饼图(≤6 片,长尾并入"其他")
-function drawModelPie(card, daily, colorMap) {
+function drawModelPie(card, daily, colorMap, metric, formatValue) {
   const totals = new Map();
   for (const r of daily) {
     const name = displayModel(colorMap, r.model);
-    totals.set(name, (totals.get(name) || 0) + r.usd);
+    totals.set(name, (totals.get(name) || 0) + (r[metric] || 0));
   }
   const all = [...totals.entries()].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-  if (!all.length) { card.appendChild(el('div', 'chart-sub', t('noCostData'))); return; }
+  if (!all.length) { card.appendChild(el('div', 'chart-sub', t(metric === 'usd' ? 'noCostData' : 'noTokenData'))); return; }
   const top = all.slice(0, 5);
   const tail = all.slice(5).reduce((a, [, v]) => a + v, 0);
   const other = t('other');
@@ -948,19 +965,19 @@ function drawModelPie(card, daily, colorMap) {
     });
     const show = e => showTip(e.clientX, e.clientY, tip => {
       tip.appendChild(el('div', 'tt-title', name));
-      tipRow(tip, seriesColorByName(colorMap, name), (v / total * 100).toFixed(1) + '%', fmtUsd(v));
+      tipRow(tip, seriesColorByName(colorMap, name), (v / total * 100).toFixed(1) + '%', formatValue(v));
     });
     path.addEventListener('pointermove', show);
     path.addEventListener('pointerleave', hideTip);
     svg.appendChild(path);
   }
   const center = svgEl('text', { x: cx, y: cy - 2, 'text-anchor': 'middle' });
-  center.textContent = fmtUsd(total);
+  center.textContent = formatValue(total);
   center.style.font = '600 20px -apple-system, sans-serif';
   center.setAttribute('fill', '#d8dce8');
   svg.appendChild(center);
   const centerSub = svgEl('text', { x: cx, y: cy + 18, 'text-anchor': 'middle' });
-  centerSub.textContent = t('totalCost');
+  centerSub.textContent = metric === 'usd' ? t('totalCost') : t('tokenUsage');
   svg.appendChild(centerSub);
 
   const list = el('div');
@@ -975,7 +992,7 @@ function drawModelPie(card, daily, colorMap) {
     nameNode.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     row.appendChild(nameNode);
     row.appendChild(el('span', 'hbar-val', (v / total * 100).toFixed(1) + '%'));
-    row.appendChild(el('span', 'hbar-val', fmtUsd(v)));
+    row.appendChild(el('span', 'hbar-val', formatValue(v)));
     list.appendChild(row);
   }
   wrap.appendChild(svg);
@@ -1062,17 +1079,17 @@ function drawHeatmap(card, activity, cutoffKey) {
 }
 
 // Top10 项目成本(水平条形图)
-function drawTopProjects(card, projectDaily) {
+function drawTopProjects(card, projectDaily, metric, formatValue) {
   const totals = new Map();
   for (const r of projectDaily) {
-    const cur = totals.get(r.project) || { name: r.name, usd: 0 };
-    cur.usd += r.usd;
+    const cur = totals.get(r.project) || { name: r.name, value: 0 };
+    cur.value += r[metric] || 0;
     totals.set(r.project, cur);
   }
-  const rows = [...totals.values()].filter(p => p.usd > 0).sort((a, b) => b.usd - a.usd);
-  if (!rows.length) { card.appendChild(el('div', 'chart-sub', t('noCostData'))); return; }
+  const rows = [...totals.values()].filter(p => p.value > 0).sort((a, b) => b.value - a.value);
+  if (!rows.length) { card.appendChild(el('div', 'chart-sub', t(metric === 'usd' ? 'noCostData' : 'noTokenData'))); return; }
   const top = rows.slice(0, 10);
-  const max = top[0].usd;
+  const max = top[0].value;
   for (const p of top) {
     const row = el('div', 'hbar-row');
     const name = el('span', 'hbar-name', p.name);
@@ -1080,15 +1097,16 @@ function drawTopProjects(card, projectDaily) {
     row.appendChild(name);
     const track = el('div', 'hbar-track');
     const fill = el('div', 'hbar-fill');
-    fill.style.width = Math.max(1, p.usd / max * 100) + '%';
+    fill.style.width = Math.max(1, p.value / max * 100) + '%';
     track.appendChild(fill);
     row.appendChild(track);
-    row.appendChild(el('span', 'hbar-val', fmtUsd(p.usd)));
+    row.appendChild(el('span', 'hbar-val', formatValue(p.value)));
     card.appendChild(row);
   }
   if (rows.length > 10) {
-    const restUsd = rows.slice(10).reduce((a, p) => a + p.usd, 0);
-    card.appendChild(el('div', 'chart-sub', t('remainingProjects', { n: rows.length - 10, cost: fmtUsd(restUsd) })));
+    const rest = rows.slice(10).reduce((a, p) => a + p.value, 0);
+    const key = metric === 'usd' ? 'remainingProjects' : 'remainingProjectsTokens';
+    card.appendChild(el('div', 'chart-sub', t(key, { n: rows.length - 10, cost: formatValue(rest), tokens: formatValue(rest) })));
   }
 }
 
@@ -1110,21 +1128,30 @@ function renderStats() {
     btn.onclick = () => { state.statsRange = days; renderStats(); };
     filter.appendChild(btn);
   }
+  const metricToggle = el('div', 'metric-toggle');
+  for (const [label, metric] of [[t('costMode'), 'cost'], [t('tokenMode'), 'tokens']]) {
+    const btn = el('button', 'metric-btn' + (state.statsMetric === metric ? ' active' : ''), label);
+    btn.onclick = () => { state.statsMetric = metric; renderStats(); };
+    metricToggle.appendChild(btn);
+  }
+  filter.appendChild(metricToggle);
   page.appendChild(filter);
 
   const cutoffKey = statsCutoffKey();
   const daily = d.daily.filter(r => !cutoffKey || r.date >= cutoffKey);
   const projectDaily = d.projectDaily.filter(r => !cutoffKey || r.date >= cutoffKey);
   const activity = d.activity.filter(r => !cutoffKey || r.date >= cutoffKey);
-  const colorMap = modelColorMap(d.models); // 基于全量排序,筛选不换色
+  const metric = state.statsMetric === 'tokens' ? 'tokenUsage' : 'usd';
+  const formatValue = metric === 'usd' ? fmtUsd : fmtTokens;
+  const colorMap = modelColorMap(d.models, metric); // 基于当前指标的全量排序,筛选不换色
 
   // KPI
-  const totalUsd = daily.reduce((a, r) => a + r.usd, 0);
-  const activeDays = new Set(daily.filter(r => r.usd > 0).map(r => r.date)).size;
+  const totalValue = daily.reduce((a, r) => a + (r[metric] || 0), 0);
+  const activeDays = new Set(daily.filter(r => r[metric] > 0).map(r => r.date)).size;
   const totalTurns = activity.reduce((a, r) => a + r.turns, 0);
   const kpis = [
-    [t('totalCost'), fmtUsd(totalUsd)],
-    [t('avgDailyCost'), activeDays ? fmtUsd(totalUsd / activeDays) : '$0.00'],
+    [t(metric === 'usd' ? 'totalCost' : 'tokenUsage'), formatValue(totalValue)],
+    [t(metric === 'usd' ? 'avgDailyCost' : 'avgDailyTokens'), activeDays ? formatValue(totalValue / activeDays) : formatValue(0)],
     [t('activeDays'), String(activity.length)],
     [t('turns'), totalTurns.toLocaleString()],
   ];
@@ -1137,20 +1164,23 @@ function renderStats() {
   }
   page.appendChild(kpiRow);
 
-  const unknownNote = d.unknownModels && d.unknownModels.length
+  const unknownNote = metric === 'usd' && d.unknownModels && d.unknownModels.length
     ? t('unknownPrices', { names: d.unknownModels.join(', ') }) : '';
 
-  const c1 = chartCard(page, t('dailyCost'), t('dailyCostSub') + (unknownNote ? ' · ' + unknownNote : ''));
-  drawDailyCost(c1, daily, colorMap);
+  const c1 = chartCard(page, t(metric === 'usd' ? 'dailyCost' : 'dailyTokens'),
+    t(metric === 'usd' ? 'dailyCostSub' : 'dailyTokensSub') + (unknownNote ? ' · ' + unknownNote : ''));
+  drawDailyCost(c1, daily, colorMap, metric, formatValue);
 
-  const c2 = chartCard(page, t('modelShare'), t('modelShareSub'));
-  drawModelPie(c2, daily, colorMap);
+  const c2 = chartCard(page, t(metric === 'usd' ? 'modelShare' : 'modelTokenShare'),
+    t(metric === 'usd' ? 'modelShareSub' : 'modelTokenShareSub'));
+  drawModelPie(c2, daily, colorMap, metric, formatValue);
 
   const c3 = chartCard(page, t('activity'), t('activitySub'));
   drawHeatmap(c3, d.activity, cutoffKey);
 
-  const c4 = chartCard(page, t('projectTop'), t('projectTopSub'));
-  drawTopProjects(c4, projectDaily);
+  const c4 = chartCard(page, t(metric === 'usd' ? 'projectTop' : 'projectTokenTop'),
+    t(metric === 'usd' ? 'projectTopSub' : 'projectTokenTopSub'));
+  drawTopProjects(c4, projectDaily, metric, formatValue);
 }
 
 async function openStats() {
@@ -1225,7 +1255,7 @@ function sessionRow(s, showProject) {
     model.title = s.models && s.models.length ? s.models.join(', ') : s.model;
     sub.appendChild(model);
   }
-  if (s.contextTokens != null) {
+  if (s.contextTokens != null || (s.contextPeaks && s.contextPeaks.length)) {
     sub.appendChild(document.createTextNode(' · '));
     sub.appendChild(el('span', 'ctx', contextValue(s)));
   }
@@ -1360,7 +1390,7 @@ async function openSession(s, keepScroll) {
     if (s.id) metrics.push('Session ID ' + s.id);
     if (s.model) metrics.push(t('model', { name: s.model }) + (s.models && s.models.length > 1 ? ' +' + (s.models.length - 1) : ''));
     if (s.thinkingEffort) metrics.push(t('thinkingEffort', { value: s.thinkingEffort }));
-    if (s.contextTokens != null) metrics.push(contextText(s));
+    if (s.contextTokens != null || (s.contextPeaks && s.contextPeaks.length)) metrics.push(contextText(s));
     if (s.usage) metrics.push(costText(s.cost));
     const metricsNode = el('div', 'detail-metrics', metrics.join(' · '));
     metricsNode.title = costTitle(s);
