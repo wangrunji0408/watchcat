@@ -340,6 +340,16 @@ test('uses long-context prices above 272K input tokens', () => {
   assert.equal(result.cost.usd, 1.5225);
 });
 
+test('uses the current GPT-5.6 Luna prices, including cache writes', () => {
+  const shortUsage = normalizedUsage({ input_tokens: 100_000, cached_input_tokens: 10_000, output_tokens: 100_000 }, 'codex');
+  const short = summarizeUsageRecords([{ model: 'gpt-5.6-luna', usage: shortUsage }]);
+  assert.equal(short.cost.usd, .1382);
+
+  const longUsage = normalizedUsage({ input_tokens: 300_000, output_tokens: 1_000_000, cache_write_tokens: 100_000 }, 'codex');
+  const long = summarizeUsageRecords([{ model: 'gpt-5.6-luna', usage: longUsage }]);
+  assert.equal(long.cost.usd, 1.97);
+});
+
 test('deduplicates repeated Claude log entries by message id', () => {
   const user = { type: 'user', message: { content: 'hello' }, timestamp: '2026-07-17T00:00:00Z' };
   const assistant = {
