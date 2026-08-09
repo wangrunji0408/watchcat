@@ -5,6 +5,7 @@ const path = require('node:path');
 
 const {
   decorateOpenClawSummary,
+  decorateHermesSummary,
   detailClaude,
   detailCodex,
   detailCetus,
@@ -16,6 +17,8 @@ const {
   linkCodexSubagents,
   normalizeModelName,
   normalizedUsage,
+  parseHermesDelegationBatch,
+  parseHermesBackgroundProcess,
   priceForModel,
   summarizeClaude,
   summarizeCodex,
@@ -24,6 +27,19 @@ const {
   summarizeOpenClaw,
   summarizeUsageRecords,
 } = require('../server');
+
+test('links Hermes subagents to their main session so the list can hide them', () => {
+  const child = decorateHermesSummary(
+    { source: 'hermes', id: 'child', file: 'hermes:child' },
+    'main',
+    'subagent',
+  );
+
+  assert.equal(child.sessionKind, 'subagent');
+  assert.equal(child.parentSessionId, 'main');
+  assert.equal(child.parentFile, 'hermes:main');
+  assert.equal(child.subagentType, 'hermes');
+});
 
 test('recursively includes subagent usage and cost in parent sessions', () => {
   const usage = (inputTokens) => ({ inputTokens, cachedInputTokens: 0, cacheWriteTokens: 0,
@@ -101,6 +117,48 @@ test('renders Hermes context summaries as compaction events', () => {
   assert.equal(detail[0].summary, '## Checkpoint\n\nContinue here.');
   assert.equal(detail[1].summary, 'Legacy checkpoint');
   assert.equal(detail[2].text, 'actual request');
+});
+
+test('renders Hermes background process notifications as task events', () => {
+  const content = `[IMPORTANT: Background process proc_example completed normally (exit code 0).
+Command: npm test
+Output:
+all tests passed
+]`;
+  assert.deepEqual(parseHermesBackgroundProcess(content), {
+    role: 'background_task', event: 'completed', taskId: 'proc_example', toolName: 'terminal',
+    exitCode: 0, command: 'npm test', output: 'all tests passed',
+  });
+  const detail = detailHermesRows([{ role: 'user', content, timestamp: 1, active: 1 }]);
+  assert.equal(detail[0].role, 'background_task');
+});
+
+test('renders Hermes async delegation batch completions as structured events', () => {
+  const content = `[ASYNC DELEGATION BATCH COMPLETE — deleg_example]
+A background fan-out of 2 subagent(s) you dispatched earlier has finished.
+Role: leaf   Model: deepseek-v4-flash   Total duration: 12.5s
+
+--- ✓ TASK 1/2: First task  (status=done, api_calls=3, 10.2s) ---
+Completed successfully.
+Full live transcript (complete tool/assistant trace): /tmp/task-0.log
+
+--- ✗ TASK 2/2: Second task  (status=timeout, api_calls=4, 12.4s) ---
+(no summary — status=timeout)`;
+  const batch = parseHermesDelegationBatch(content);
+  assert.equal(batch.role, 'delegation_batch');
+  assert.equal(batch.delegationId, 'deleg_example');
+  assert.equal(batch.model, 'deepseek-v4-flash');
+  assert.equal(batch.tasks.length, 2);
+  assert.deepEqual(batch.tasks[0], {
+    index: 1, total: 2, symbol: '✓', title: 'First task', status: 'done', apiCalls: 3,
+    duration: 10.2, summary: 'Completed successfully.', transcript: '/tmp/task-0.log',
+  });
+
+  const detail = detailHermesRows([{ role: 'user', content, timestamp: 1, active: 1 }]);
+  assert.deepEqual(detail.map(message => [message.role, message.event, message.title]), [
+    ['subagent', 'completed', 'First task'],
+    ['subagent', 'timeout', 'Second task'],
+  ]);
 });
 
 test('does not render inactive Hermes compaction archive copies', () => {

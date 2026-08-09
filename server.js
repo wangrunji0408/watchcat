@@ -1335,6 +1335,17 @@ function hermesGatewayAlive() {
   } catch { return false; }
 }
 
+function decorateHermesSummary(summary, parentSessionId, sessionSource) {
+  if (!parentSessionId && sessionSource !== 'subagent') return summary;
+  return {
+    ...summary,
+    sessionKind: 'subagent',
+    parentSessionId: parentSessionId || null,
+    parentFile: parentSessionId ? 'hermes:' + parentSessionId : null,
+    subagentType: sessionSource === 'subagent' ? 'hermes' : sessionSource || null,
+  };
+}
+
 let hermesCache = { at: 0, sessions: [] };
 
 function hermesSessions() {
@@ -1342,7 +1353,7 @@ function hermesSessions() {
   if (!db) return [];
   if (Date.now() - hermesCache.at < 3000) return hermesCache.sessions;
   const rows = db.prepare(`
-    SELECT s.id, s.source, s.title, s.cwd, s.git_branch, s.model_config,
+    SELECT s.id, s.source, s.parent_session_id, s.title, s.cwd, s.git_branch, s.model_config,
       s.started_at, s.ended_at, s.message_count,
       (SELECT m.content FROM messages m WHERE m.session_id = s.id AND m.role = 'user'
          AND m.content IS NOT NULL AND m.content NOT LIKE '[IMPORTANT:%' ORDER BY m.timestamp LIMIT 1) AS first_user,
@@ -1398,7 +1409,7 @@ function hermesSessions() {
     const totals = summarizeUsageRecords(usageRecords);
     const lastSec = r.last_msg_ts || r.ended_at || r.started_at;
     const lastTs = lastSec ? new Date(lastSec * 1000).toISOString() : null;
-    const s = {
+    let s = {
       source: 'hermes',
       daily: summarizeDailyRecords(usageRecords),
       activity: activityBySession.get(r.id) || [],
@@ -1421,6 +1432,7 @@ function hermesSessions() {
       cost: totals.cost,
       sizeBytes: 0,
     };
+    s = decorateHermesSummary(s, r.parent_session_id, r.source);
     const ageMs = lastSec ? now - lastSec * 1000 : Infinity;
     if (alive && ageMs < 2 * 60 * 1000) s.status = 'running';
     else if (alive && r.ended_at == null) s.status = 'open';
@@ -1465,6 +1477,44 @@ function hermesCompactionSummary(content) {
   return summaryStart < 0 ? '' : content.slice(summaryStart + 1).trim();
 }
 
+function parseHermesDelegationBatch(content) {
+  if (typeof content !== 'string') return null;
+  const header = content.match(/^\[ASYNC DELEGATION BATCH COMPLETE\s+[—-]\s+([^\]]+)\]/);
+  if (!header) return null;
+  const count = Number(content.match(/fan-out of (\d+) subagent/i)?.[1]) || null;
+  const model = content.match(/^Role:.*?\bModel:\s*(\S+)/m)?.[1] || null;
+  const totalDuration = Number(content.match(/^Role:.*?\bTotal duration:\s*([\d.]+)s/m)?.[1]) || null;
+  const taskPattern = /^---\s+([^\s]+)\s+TASK\s+(\d+)\/(\d+):\s+(.*?)\s+\(status=([^,\s)]+)(?:,\s*api_calls=(\d+))?(?:,\s*([\d.]+)s)?\)\s+---\s*$/gm;
+  const matches = [...content.matchAll(taskPattern)];
+  const tasks = matches.map((match, index) => {
+    const start = match.index + match[0].length;
+    const end = matches[index + 1]?.index ?? content.length;
+    const body = content.slice(start, end).trim();
+    const transcriptMatch = body.match(/^Full live transcript[^:]*:\s*(.+)$/m);
+    const summary = body.replace(/^Full live transcript[^:]*:\s*.+$/m, '').trim();
+    return {
+      index: Number(match[2]), total: Number(match[3]), symbol: match[1], title: match[4].trim(),
+      status: match[5], apiCalls: match[6] == null ? null : Number(match[6]),
+      duration: match[7] == null ? null : Number(match[7]), summary,
+      transcript: transcriptMatch?.[1]?.trim() || null,
+    };
+  });
+  if (!tasks.length) return null;
+  return { role: 'delegation_batch', delegationId: header[1].trim(), count: count || tasks.length,
+    model, totalDuration, tasks };
+}
+
+function parseHermesBackgroundProcess(content) {
+  if (typeof content !== 'string') return null;
+  const match = content.match(/^\[IMPORTANT: Background process (\S+) (?:completed normally|completed|exited) \(exit code (-?\d+)(?:,[^)]+)?\)\.\nCommand:\s*([\s\S]*?)\nOutput:\s*\n?([\s\S]*?)\n?\]$/);
+  if (!match) return null;
+  const exitCode = Number(match[2]);
+  return {
+    role: 'background_task', event: exitCode === 0 ? 'completed' : 'failed', taskId: match[1],
+    toolName: 'terminal', exitCode, command: match[3].trim(), output: match[4].trim(),
+  };
+}
+
 function detailHermesRows(rows) {
   const msgs = [];
   for (const r of rows) {
@@ -1473,7 +1523,20 @@ function detailHermesRows(rows) {
     if (r.active === 0) continue;
     const ts = r.timestamp ? new Date(r.timestamp * 1000).toISOString() : null;
     const compactionSummary = hermesCompactionSummary(r.content);
-    if (compactionSummary != null) {
+    const delegationBatch = parseHermesDelegationBatch(r.content);
+    const backgroundProcess = parseHermesBackgroundProcess(r.content);
+    if (backgroundProcess) {
+      msgs.push({ ...backgroundProcess, ts });
+    } else if (delegationBatch) {
+      for (const task of delegationBatch.tasks) {
+        const event = ['done', 'completed', 'success'].includes(task.status) ? 'completed' : task.status;
+        msgs.push({
+          role: 'subagent', event, agentId: `${delegationBatch.delegationId}:${task.index}`,
+          title: task.title, text: task.summary, ts, delegationId: delegationBatch.delegationId,
+          model: delegationBatch.model, apiCalls: task.apiCalls, duration: task.duration,
+        });
+      }
+    } else if (compactionSummary != null) {
       msgs.push({ role: 'compaction', summary: compactionSummary, ts });
     } else if (r.role === 'user' && r.content) {
       msgs.push({ role: 'user', text: r.content, ts });
@@ -2139,15 +2202,29 @@ function attachSubagentEvents(messages, parentFile) {
   const children = subagentSessionsByParentFile.get(parentFile) || [];
   if (!children.length) return messages;
   const byId = new Map();
+  const byTitle = new Map();
   for (const child of children) {
     for (const id of [subagentEventId(child), child.id]) {
       if (id) byId.set(id, child);
     }
+    if (child.title) byTitle.set(child.title, child);
   }
 
   const events = messages.map(message => {
+    if (message.role === 'delegation_batch') {
+      return { ...message, tasks: message.tasks.map(task => {
+        const child = byTitle.get(task.title) || children.find(candidate => {
+          const titlePrefix = String(candidate.title || '').replace(/…$/, '');
+          return titlePrefix && task.title.startsWith(titlePrefix);
+        });
+        return child ? { ...task, subagent: subagentLink(child) } : task;
+      }) };
+    }
     if (message.role !== 'subagent') return message;
-    const child = byId.get(message.agentId);
+    const child = byId.get(message.agentId) || byTitle.get(message.title) || children.find(candidate => {
+      const titlePrefix = String(candidate.title || '').replace(/…$/, '');
+      return titlePrefix && String(message.title || '').startsWith(titlePrefix);
+    });
     return child ? { ...message, title: message.title || child.title, subagent: subagentLink(child) } : message;
   });
   const seen = new Set(events.filter(m => m.role === 'subagent').map(m => `${m.agentId}:${m.event}`));
@@ -2366,7 +2443,8 @@ function apiSessionDetail(query) {
   if (file.startsWith('hermes:')) {
     const id = file.slice('hermes:'.length);
     if (!/^[\w.-]+$/.test(id)) throw httpError(400, 'bad hermes session id');
-    return { file, source: 'hermes', messages: detailHermes(id) };
+    const messages = attachSubagentEvents(detailHermes(id), file);
+    return { file, source: 'hermes', messages };
   }
   if (file.startsWith('remote-codex:') || file.startsWith('remote-claude:')) {
     const remote = remoteFileIndex.get(file);
@@ -2480,5 +2558,8 @@ module.exports = {
   summarizeDsh,
   summarizeOpenClaw,
   decorateOpenClawSummary,
+  decorateHermesSummary,
+  parseHermesDelegationBatch,
+  parseHermesBackgroundProcess,
   summarizeUsageRecords,
 };

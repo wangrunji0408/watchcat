@@ -698,7 +698,12 @@ function renderActivity(messages, start, sessionFile) {
     item.appendChild(el('summary', null, name + (call.use && call.use.ts ? ' · ' + fmtTime(call.use.ts) : '')));
     const detail = el('div', 'tool-detail');
     if (task) {
+      detail.appendChild(el('div', 'tool-detail-label', t('toolUse')));
       detail.appendChild(renderBash(task.command || task.text || ''));
+      if (task.output) {
+        detail.appendChild(el('div', 'tool-detail-label', t('toolResult')));
+        detail.appendChild(renderBash(task.output));
+      }
     } else if (call.use) {
       detail.appendChild(el('div', 'tool-detail-label', t('toolUse')));
       detail.appendChild(call.use.edit
