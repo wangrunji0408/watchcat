@@ -700,6 +700,40 @@ test('renders context compaction events from supported logs', () => {
   assert.equal(openClaw[0].beforeTokens, 190000);
 });
 
+test('renders Claude Code compaction summaries and context peaks', () => {
+  const rows = [
+    { type: 'user', timestamp: '2026-07-18T00:00:00Z', cwd: '/tmp/project',
+      message: { role: 'user', content: 'Build a fictional example.' } },
+    { type: 'assistant', timestamp: '2026-07-18T00:00:01Z', message: {
+      id: 'before', model: 'claude-sonnet-4-5', content: [{ type: 'text', text: 'Working.' }],
+      usage: { input_tokens: 160000, output_tokens: 1000 },
+    } },
+    { type: 'system', subtype: 'compact_boundary', timestamp: '2026-07-18T00:00:02Z',
+      compactMetadata: { trigger: 'auto', preTokens: 167000 } },
+    { type: 'user', isCompactSummary: true, isVisibleInTranscriptOnly: true,
+      timestamp: '2026-07-18T00:00:03Z', message: {
+      role: 'user', content: '## Summary\n\nContinue from the checkpoint.',
+    } },
+    { type: 'assistant', timestamp: '2026-07-18T00:00:04Z', message: {
+      id: 'after', model: 'claude-sonnet-4-5', content: [{ type: 'text', text: 'Done.' }],
+      usage: { input_tokens: 12000, output_tokens: 500 },
+    } },
+    { type: 'assistant', timestamp: '2026-07-18T00:00:05Z', message: {
+      id: 'placeholder', model: '<synthetic>', content: [],
+      usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 },
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeClaude('/tmp/project/session.jsonl', { size: content.length }, content);
+  const detail = detailClaude('/tmp/project/session.jsonl', content);
+
+  assert.deepEqual(summary.contextPeaks, [167000]);
+  assert.equal(summary.contextTokens, 12500);
+  assert.equal(detail.find(message => message.role === 'compaction').summary,
+    '## Summary\n\nContinue from the checkpoint.');
+  assert.equal(detail.some(message => message.role === 'user' && message.text.startsWith('## Summary')), false);
+});
+
 test('merges Codex compaction completion notifications into their compacted summaries', () => {
   const rows = [
     { type: 'session_meta', timestamp: '2026-07-18T00:00:00Z', payload: {

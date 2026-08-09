@@ -377,6 +377,7 @@ function summarizeClaude(file, stat, content) {
   let agentId = isSubagent ? path.basename(file, '.jsonl').replace(/^agent-/, '') : null;
   let parentSessionId = null, subagentType = null;
   let contextTokens = null;
+  const contextPeaks = [];
   const models = new Set();
   const usageByMessage = new Map();
   const activityByDay = new Map();
@@ -393,6 +394,10 @@ function summarizeClaude(file, stat, content) {
       subagentType = l.attributionAgent || subagentType;
     } else if (l.sessionId) sessionId = l.sessionId;
     if (l.type === 'summary' && l.summary) summaryTitle = l.summary;
+    if (l.type === 'system' && l.subtype === 'compact_boundary') {
+      const beforeTokens = Number(l.compactMetadata && l.compactMetadata.preTokens);
+      if (Number.isFinite(beforeTokens) && beforeTokens > 0) contextPeaks.push(beforeTokens);
+    }
     if (l.type === 'custom-title' && typeof l.customTitle === 'string' && l.customTitle.trim()) {
       customTitle = l.customTitle.trim();
     }
@@ -413,8 +418,9 @@ function summarizeClaude(file, stat, content) {
       if (text) { assistantCount++; lastEventText = text; bumpDate(activityByDay, l.timestamp); }
       const u = l.message.usage;
       if (u && u.input_tokens != null) {
-        contextTokens = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) +
+        const messageContextTokens = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) +
           (u.cache_read_input_tokens || 0) + (u.output_tokens || 0);
+        if (messageContextTokens > 0) contextTokens = messageContextTokens;
         const messageKey = l.message.id || l.requestId || l.uuid;
         usageByMessage.set(messageKey || `line:${usageByMessage.size}`, {
           model: l.message.model && l.message.model !== '<synthetic>' ? l.message.model : model,
@@ -447,6 +453,7 @@ function summarizeClaude(file, stat, content) {
     models: [...models],
     thinkingEffort,
     contextTokens,
+    contextPeaks,
     usage: totals.usage,
     cost: totals.cost,
     sizeBytes: stat.size,
@@ -1582,6 +1589,7 @@ function detailClaude(file, content) {
   const msgs = [];
   const readCalls = new Set();
   const agentCalls = new Map();
+  let pendingCompaction = null;
 
   if (!isSubagent) {
     for (const l of lines) {
@@ -1612,15 +1620,26 @@ function detailClaude(file, content) {
     if (l.isSidechain && !isSubagent) continue;
     if (l.type === 'system' && l.subtype === 'compact_boundary') {
       const metadata = l.compactMetadata || {};
-      msgs.push({
+      pendingCompaction = {
         role: 'compaction', ts: l.timestamp,
         trigger: metadata.trigger || null,
         beforeTokens: metadata.preTokens ?? null,
         afterTokens: metadata.postTokens ?? null,
         durationMs: metadata.durationMs ?? null,
-      });
+      };
+      if (typeof metadata.summary === 'string' && metadata.summary.trim()) {
+        pendingCompaction.summary = metadata.summary.trim();
+      }
+      msgs.push(pendingCompaction);
       continue;
     }
+    if (pendingCompaction && l.type === 'user' && (l.isCompactSummary || l.isMeta) && l.message) {
+      const summary = (extractText(l.message.content) || '').trim();
+      if (summary) pendingCompaction.summary ||= summary;
+      pendingCompaction = null;
+      continue;
+    }
+    if (l.type !== 'system') pendingCompaction = null;
     if (!isSubagent && l.type === 'user' && l.toolUseResult && l.toolUseResult.agentId &&
         (l.toolUseResult.isAsync || l.toolUseResult.status === 'async_launched')) {
       const callId = Array.isArray(l.message && l.message.content)
