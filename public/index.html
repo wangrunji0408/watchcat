@@ -71,7 +71,11 @@
   button.subagent-card { cursor: pointer; }
   button.subagent-card:hover { background: rgba(242,140,87,.14); border-color: var(--openclaw); }
   .subagent-card-title { font-weight: 600; }
-  .subagent-card-sub { margin-top: 2px; color: var(--dim); font-size: 12px; }
+  .subagent-card-sub { margin-top: 2px; color: var(--dim); font-size: 12px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .todo-card { display: block; width: 100%; max-width: 900px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+  .todo-row { display: flex; gap: 8px; padding: 3px 0; }
+  .todo-row.completed { color: var(--dim); text-decoration: line-through; }
   .msg.thinking .bubble, .msg.tool_use .bubble, .msg.tool_result .bubble {
     background: transparent; border: 1px dashed var(--border); color: var(--dim); font-size: 12.5px;
     font-family: ui-monospace, Menlo, monospace; }
@@ -287,7 +291,7 @@ const MESSAGES = {
     model: 'Model {name}', thinkingEffort: 'Thinking effort {value}', user: 'User', assistant: 'Assistant', agentStarted: 'Agent started', agentCompleted: 'Agent completed',
     backgroundTaskCompleted: 'Background task completed', backgroundTaskStatus: 'Background task: {status}', exitCode: 'exit {code}',
     goalCreated: 'Goal created', goalCompleted: 'Goal completed', goalBlocked: 'Goal blocked', goalPaused: 'Goal paused',
-    goalResumed: 'Goal resumed', goalUpdated: 'Goal updated', goalRound: 'Goal round {round}', blockedReason: 'Blocked: {reason}',
+    goalResumed: 'Goal resumed', goalUpdated: 'Goal updated', goalRound: 'Goal round {round}', blockedReason: 'Blocked: {reason}', todoUpdated: 'Task list updated',
     runtimeContext: 'Runtime context',
     agentFailed: 'Agent failed', agentTimeout: 'Agent timed out', agentCancelled: 'Agent cancelled', agentAborted: 'Agent aborted', agentStatus: 'Agent status',
     viewSubagent: 'View subagent log', automatic: 'automatic', manual: 'manual', beforeCompaction: '{n} tokens before compaction', compacted: 'Context compacted',
@@ -315,7 +319,7 @@ const MESSAGES = {
     model: '模型 {name}', thinkingEffort: '思考强度 {value}', user: '用户', assistant: '助手', agentStarted: 'Agent 已创建', agentCompleted: 'Agent 完成',
     backgroundTaskCompleted: '后台任务已完成', backgroundTaskStatus: '后台任务：{status}', exitCode: '退出码 {code}',
     goalCreated: '目标已创建', goalCompleted: '目标已完成', goalBlocked: '目标受阻', goalPaused: '目标已暂停',
-    goalResumed: '目标已恢复', goalUpdated: '目标已更新', goalRound: '目标轮次 {round}', blockedReason: '受阻原因：{reason}',
+    goalResumed: '目标已恢复', goalUpdated: '目标已更新', goalRound: '目标轮次 {round}', blockedReason: '受阻原因：{reason}', todoUpdated: '任务清单已更新',
     runtimeContext: '运行环境',
     agentFailed: 'Agent 失败', agentTimeout: 'Agent 超时', agentCancelled: 'Agent 已取消', agentAborted: 'Agent 已中止', agentStatus: 'Agent 状态',
     viewSubagent: '点击查看 subagent 记录', automatic: '自动', manual: '手动', beforeCompaction: '压缩前 {n} tokens', compacted: '上下文已压缩',
@@ -1403,6 +1407,7 @@ async function openSession(s, keepScroll) {
     head.appendChild(summary);
     main.appendChild(head);
     const roleNames = { user: t('user'), assistant: t('assistant') };
+    let firstGoalShown = false;
     for (let i = 0; i < data.messages.length;) {
       const m = data.messages[i];
       if (m.role === 'subagent') {
@@ -1428,6 +1433,8 @@ async function openSession(s, keepScroll) {
         continue;
       }
       if (m.role === 'goal') {
+        const isFirstGoal = !firstGoalShown;
+        firstGoalShown = true;
         const eventNames = {
           create: t('goalCreated'), complete: t('goalCompleted'), block: t('goalBlocked'),
           pause: t('goalPaused'), resume: t('goalResumed'), edit: t('goalUpdated'), updated: t('goalUpdated'),
@@ -1444,6 +1451,7 @@ async function openSession(s, keepScroll) {
           continue;
         }
         const box = expandable('details', 'msg compaction', s.file + ':goal:' + i);
+        if (isFirstGoal) box.open = true;
         const summary = el('summary', 'compaction-summary');
         summary.appendChild(el('span', 'compaction-label', label));
         box.appendChild(summary);
@@ -1451,6 +1459,21 @@ async function openSession(s, keepScroll) {
         if (m.objective) content.appendChild(renderMarkdown(m.objective, 'markdown-body'));
         if (m.reason) content.appendChild(el('div', 'tool-detail-value', t('blockedReason', { reason: m.reason })));
         box.appendChild(content);
+        main.appendChild(box);
+        i++;
+        continue;
+      }
+      if (m.role === 'todo') {
+        const box = el('div', 'msg');
+        box.appendChild(el('div', 'meta', t('todoUpdated') + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
+        const card = el('div', 'todo-card');
+        for (const todo of m.todos || []) {
+          const row = el('div', 'todo-row ' + todo.status);
+          row.appendChild(el('span', null, todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '◉' : '○'));
+          row.appendChild(el('span', null, todo.content));
+          card.appendChild(row);
+        }
+        box.appendChild(card);
         main.appendChild(box);
         i++;
         continue;

@@ -65,7 +65,7 @@ function truncateBlock(s, n) {
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
-// 更新于 2026-08-09：
+// 更新于 2026-08-13：
 // OpenAI: https://developers.openai.com/api/docs/pricing
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
@@ -125,6 +125,19 @@ function normalizeModelName(model) {
 
 function priceForModel(model, usage = {}, now = new Date()) {
   const normalized = normalizeModelName(model);
+  // DeepSeek 自 2026-08-16 16:00 UTC 起实行峰谷价。峰时段为
+  // 01:00–04:00、06:00–10:00 UTC，其余时间按半价计费。
+  if (/deepseek[-.](?:v4[-.](?:flash|pro)|chat|reasoner)(?:\b|$)/.test(normalized) &&
+      now >= new Date('2026-08-16T16:00:00Z')) {
+    const pro = /v4[-.]pro(?:\b|$)/.test(normalized);
+    const hour = now.getUTCHours();
+    const peak = (hour >= 1 && hour < 4) || (hour >= 6 && hour < 10);
+    const rates = pro
+      ? (peak ? [.044, 1.32, 3.96] : [.022, .66, 1.98])
+      : (peak ? [.014, .44, 1.32] : [.007, .22, .66]);
+    return { name: pro ? 'DeepSeek V4 Pro' : 'DeepSeek V4 Flash',
+      cached: rates[0], input: rates[1], output: rates[2] };
+  }
   // Sonnet 5 的官方推广价截至 2026-08-31，之后自动切换标准价。
   if (/sonnet[-.]5(?:\b|$)/.test(normalized)) {
     const promotional = now < new Date('2026-09-01T00:00:00Z');
@@ -191,7 +204,7 @@ function summarizeUsageRecords(records) {
   for (const record of records) {
     const u = record.usage;
     for (const key of Object.keys(usage)) usage[key] += Number(u[key] || 0);
-    const price = priceForModel(record.model, u);
+    const price = priceForModel(record.model, u, record.ts ? new Date(record.ts) : new Date());
     if (!price) {
       unpriced++;
       if (record.model) unknownModels.add(record.model);
@@ -646,6 +659,8 @@ function summarizeDsh(file, stat, content) {
   const models = new Set();
   const usageRecords = [];
   const activityByDay = new Map();
+  const spawnedAgentIds = new Set();
+  let sessionKind = 'agent', subagentType = null;
 
   for (const l of lines) {
     const ts = isoTime(l.time ?? l.createdAt);
@@ -654,6 +669,9 @@ function summarizeDsh(file, stat, content) {
     if (l.type === 'session') {
       cwd = l.cwd || cwd;
       sessionId = l.id || sessionId;
+    } else if (l.type === 'subagent/descriptor') {
+      sessionKind = 'subagent';
+      subagentType = d.label || d.mode || 'dsh';
     } else if (l.type === 'session/title' && d.title) {
       title = d.title;
     } else if (l.type === 'request/header') {
@@ -691,6 +709,9 @@ function summarizeDsh(file, stat, content) {
           ts,
         });
       }
+    } else if (l.type === 'tool/result') {
+      const match = dshToolResultText(d.message).match(/started subagent\s+([\w-]+)/i);
+      if (match) spawnedAgentIds.add(match[1]);
     }
   }
   if (!firstUserText && !agentCount) return null;
@@ -716,6 +737,9 @@ function summarizeDsh(file, stat, content) {
     usage: totals.usage,
     cost: totals.cost,
     sizeBytes: stat.size,
+    sessionKind,
+    subagentType,
+    spawnedAgentIds: [...spawnedAgentIds],
   };
 }
 
@@ -1943,9 +1967,34 @@ function parseDshGoalEvent(message) {
 
 function parseDshRuntimeContext(message) {
   if (!message || message.source?.kind !== 'plugin' ||
-      message.source.plugin !== '@deepseek-ai/dsh-system-prompt') return null;
+      !['@deepseek-ai/dsh-system-prompt', 'user-approval'].includes(message.source.plugin)) return null;
   const text = extractText(message.content);
   return text ? { role: 'runtime_context', text } : null;
+}
+
+function parseDshSubagentNotice(message) {
+  const source = message && message.source;
+  if (!source || !['subagent-report', 'subagent-settled'].includes(source.kind)) return null;
+  const fullText = extractText(message.content);
+  const text = truncate(fullText
+    .replace(/^Background subagent\s+\S+\s+(?:reported:|finished[^.]*\.)\s*/i, '')
+    .replace(/^Its closing message:\s*/i, '')
+    .replace(/\s+/g, ' '), 180);
+  return {
+    role: 'subagent', event: 'completed', agentId: source.senderSessionId || null,
+    title: 'Subagent', text,
+  };
+}
+
+function parseDshTodoWrite(raw) {
+  const input = parseToolArgs(raw);
+  if (!input || !Array.isArray(input.todos)) return null;
+  return {
+    role: 'todo',
+    todos: input.todos.map(todo => ({
+      content: String(todo.content || ''), status: String(todo.status || 'pending'),
+    })).filter(todo => todo.content),
+  };
 }
 
 function detailDsh(file, content) {
@@ -1954,6 +2003,7 @@ function detailDsh(file, content) {
   const readCalls = new Set();
   const toolNamesByCall = new Map();
   const completedCalls = new Set();
+  const semanticCalls = new Set();
   let contextPeak = 0;
   let pendingCompaction = null;
   const flushCompaction = (endTs) => {
@@ -1996,7 +2046,11 @@ function detailDsh(file, content) {
       const backgroundTask = parseDshBackgroundTask(d);
       const goalEvent = parseDshGoalEvent(d);
       const runtimeContext = parseDshRuntimeContext(d);
-      if (runtimeContext) {
+      const subagentNotice = parseDshSubagentNotice(d);
+      if (subagentNotice) {
+        if (!msgs.some(item => item.role === 'subagent' && item.event === 'completed' &&
+            item.agentId === subagentNotice.agentId)) msgs.push({ ...subagentNotice, ts });
+      } else if (runtimeContext) {
         msgs.push({ ...runtimeContext, ts });
       } else if (goalEvent) {
         msgs.push({ ...goalEvent, ts });
@@ -2004,6 +2058,14 @@ function detailDsh(file, content) {
         msgs.push({ ...backgroundTask, ts });
       } else if (value && !isNoiseUserText(value) && !isDshCompactionMessage(value)) {
         msgs.push({ role: 'user', text: value, ts });
+      }
+    } else if (l.type === 'agent/inbox/spliced') {
+      for (const message of Array.isArray(d.inserted) ? d.inserted : []) {
+        const notice = parseDshSubagentNotice(message);
+        if (notice && notice.event === 'completed' &&
+            !msgs.some(item => item.role === 'subagent' && item.event === 'completed' && item.agentId === notice.agentId)) {
+          msgs.push({ ...notice, ts });
+        }
       }
     } else if (l.type === 'assistant/message' && d.message) {
       if (d.usage) {
@@ -2018,6 +2080,19 @@ function detailDsh(file, content) {
         }
       }
     } else if (l.type === 'tool/call') {
+      if (d.name === 'subagent') {
+        const input = parseToolArgs(d.arguments) || {};
+        msgs.push({ role: 'subagent', event: 'started', agentId: d.callId || null,
+          title: input.description || 'Subagent', ts });
+        if (d.callId) semanticCalls.add(d.callId);
+        continue;
+      }
+      if (d.name === 'todo_write') {
+        const todo = parseDshTodoWrite(d.arguments);
+        if (todo) msgs.push({ ...todo, ts });
+        if (d.callId) semanticCalls.add(d.callId);
+        continue;
+      }
       const raw = d.arguments ?? '';
       const input = truncate(typeof raw === 'string' ? raw : JSON.stringify(raw), 400);
       const renderData = toolRenderData(d.name, raw);
@@ -2028,6 +2103,7 @@ function detailDsh(file, content) {
     } else if (l.type === 'tool/result') {
       const rawOutput = dshToolResultText(d.message);
       const callId = d.callId || d.message && d.message.source && d.message.source.callId || null;
+      if (callId && semanticCalls.has(callId)) continue;
       if (callId && completedCalls.has(callId)) continue;
       if (callId) completedCalls.add(callId);
       const isRead = callId && readCalls.has(callId);
@@ -2198,8 +2274,8 @@ function subagentEventId(summary) {
   return summary.agentId || summary.id;
 }
 
-function attachSubagentEvents(messages, parentFile) {
-  const children = subagentSessionsByParentFile.get(parentFile) || [];
+function attachSubagentEvents(messages, parentFile, childSessions = null) {
+  const children = childSessions || subagentSessionsByParentFile.get(parentFile) || [];
   if (!children.length) return messages;
   const byId = new Map();
   const byTitle = new Map();
@@ -2208,6 +2284,7 @@ function attachSubagentEvents(messages, parentFile) {
       if (id) byId.set(id, child);
     }
     if (child.title) byTitle.set(child.title, child);
+    if (child.subagentType) byTitle.set(child.subagentType, child);
   }
 
   const events = messages.map(message => {
@@ -2228,10 +2305,12 @@ function attachSubagentEvents(messages, parentFile) {
     return child ? { ...message, title: message.title || child.title, subagent: subagentLink(child) } : message;
   });
   const seen = new Set(events.filter(m => m.role === 'subagent').map(m => `${m.agentId}:${m.event}`));
+  const linkedEvents = new Set(events.filter(m => m.role === 'subagent' && m.subagent?.file)
+    .map(m => `${m.subagent.file}:${m.event}`));
 
   for (const child of children) {
     const agentId = subagentEventId(child);
-    if (!seen.has(`${agentId}:started`)) {
+    if (!seen.has(`${agentId}:started`) && !linkedEvents.has(`${child.file}:started`)) {
       events.push({
         role: 'subagent', event: 'started', agentId, title: child.title,
         text: 'Agent 已创建', ts: child.startedTs || child.firstTs,
@@ -2266,6 +2345,22 @@ function linkCodexSubagents(sessions) {
     if (session.source !== 'codex' || session.sessionKind !== 'subagent' || !session.parentSessionId) continue;
     const parent = byId.get(hostKey(session) + '\0' + session.parentSessionId);
     if (parent && parent !== session) session.parentFile = parent.file;
+  }
+  return sessions;
+}
+
+function linkDshSubagents(sessions) {
+  const children = new Map(sessions.filter(session => session.source === 'dsh' &&
+    session.sessionKind === 'subagent').map(session => [session.id, session]));
+  for (const parent of sessions) {
+    if (parent.source !== 'dsh') continue;
+    for (const id of parent.spawnedAgentIds || []) {
+      const child = children.get(id);
+      if (child && child !== parent) {
+        child.parentFile = parent.file;
+        child.agentId = id;
+      }
+    }
   }
   return sessions;
 }
@@ -2318,7 +2413,7 @@ async function collectSessions() {
   }
 
   sessions.push(...hermesSessions()); // hermes 的状态在读取时已确定
-  return { sessions: linkCodexSubagents(sessions), remote };
+  return { sessions: linkDshSubagents(linkCodexSubagents(sessions)), remote };
 }
 
 async function apiSessions() {
@@ -2536,6 +2631,7 @@ module.exports = {
   apiSessions,
   apiSessionDetail,
   apiStats,
+  attachSubagentEvents,
   summarizeDailyRecords,
   detailClaude,
   detailCodex,
@@ -2549,6 +2645,7 @@ module.exports = {
   normalizedUsage,
   includeSubagentCosts,
   linkCodexSubagents,
+  linkDshSubagents,
   parseRemoteScan,
   priceForModel,
   remoteAgentSessions,

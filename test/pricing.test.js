@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+  attachSubagentEvents,
   decorateOpenClawSummary,
   decorateHermesSummary,
   detailClaude,
@@ -15,6 +16,7 @@ const {
   extractThinkingEffort,
   includeSubagentCosts,
   linkCodexSubagents,
+  linkDshSubagents,
   normalizeModelName,
   normalizedUsage,
   parseHermesDelegationBatch,
@@ -221,6 +223,40 @@ test('parses DeepSeek Harness summaries and message details', () => {
   assert.equal(detail.filter(message => message.role === 'tool_result').length, 1);
 });
 
+test('links DeepSeek Harness subagent sessions to their parent', () => {
+  const parentRows = [
+    { type: 'session', id: 'parent', cwd: '/tmp/project' },
+    { type: 'user/message', data: { content: [{ type: 'text', text: 'delegate' }] } },
+    { type: 'tool/result', data: { message: { content: [{ type: 'tool-result', content: [
+      { type: 'text', text: 'started subagent child-id' },
+    ] }] } } },
+  ];
+  const childRows = [
+    { type: 'session', id: 'child-id', cwd: '/tmp/project' },
+    { type: 'subagent/descriptor', data: { label: 'Review parser', mode: 'continuable' } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'done' }] } } },
+  ];
+  const parent = summarizeDsh('/tmp/parent/session.jsonl.zstd', { size: 1 }, parentRows.map(JSON.stringify).join('\n'));
+  const child = summarizeDsh('/tmp/child-id/session.jsonl.zstd', { size: 1 }, childRows.map(JSON.stringify).join('\n'));
+  linkDshSubagents([parent, child]);
+  assert.equal(child.sessionKind, 'subagent');
+  assert.equal(child.subagentType, 'Review parser');
+  assert.equal(child.parentFile, parent.file);
+});
+
+test('does not duplicate a linked DeepSeek Harness subagent start event', () => {
+  const parentFile = '/tmp/parent/session.jsonl.zstd';
+  const child = { source: 'dsh', id: 'child-id', agentId: 'child-id',
+    file: '/tmp/child/session.jsonl.zstd', parentFile, project: '/tmp',
+    title: 'You are working in the', subagentType: 'Build static riscv64 nginx', sessionKind: 'subagent' };
+  const events = attachSubagentEvents([{
+    role: 'subagent', event: 'started', agentId: 'call-1',
+    title: 'Build static riscv64 nginx', ts: '2026-08-13T13:56:00Z',
+  }], parentFile, [child]);
+  assert.equal(events.filter(message => message.role === 'subagent' && message.event === 'started').length, 1);
+  assert.equal(events[0].subagent.file, child.file);
+});
+
 test('renders DeepSeek Harness compaction summaries and context peaks', () => {
   const rows = [
     { type: 'session', id: 'session-compact', createdAt: 1785515761000, cwd: '/tmp/project' },
@@ -326,6 +362,48 @@ test('renders DeepSeek Harness goal updates as events and excludes them from use
   assert.equal(summary.title, 'continue the work');
 });
 
+test('renders DeepSeek Harness policy, todo, and subagent messages as semantic events', () => {
+  const rows = [
+    { type: 'user/message', time: 1785515761000, data: {
+      content: [{ type: 'text', text: 'The approval policy changed from "ask" to "never" (changed by the user).' }],
+      source: { kind: 'plugin', plugin: 'user-approval' }, role: 'user',
+    } },
+    { type: 'tool/call', time: 1785515762000, data: { callId: 'call-todo', name: 'todo_write',
+      arguments: JSON.stringify({ todos: [{ content: 'Inspect parser', status: 'completed' },
+        { content: 'Fix renderer', status: 'in_progress' }] }) } },
+    { type: 'tool/result', time: 1785515762100, data: { message: {
+      source: { kind: 'tool', callId: 'call-todo' }, content: [{ type: 'tool-result', content: [
+        { type: 'text', text: 'Updated todo list' },
+      ] }],
+    } } },
+    { type: 'tool/call', time: 1785515763000, data: { callId: 'call-agent', name: 'subagent',
+      arguments: JSON.stringify({ description: 'Review parser', run_in_background: true }) } },
+    { type: 'tool/result', time: 1785515763100, data: { message: {
+      source: { kind: 'tool', callId: 'call-agent' }, content: [{ type: 'tool-result', content: [
+        { type: 'text', text: 'started subagent agent-1' },
+      ] }],
+    } } },
+    { type: 'agent/inbox/spliced', time: 1785515764000, data: { inserted: [{
+      content: [{ type: 'text', text: 'Background subagent agent-1 reported:' }, { type: 'text', text: 'Done.' }],
+      source: { kind: 'subagent-report', senderSessionId: 'agent-1' }, role: 'user',
+    }] } },
+    { type: 'user/message', time: 1785515764100, data: {
+      content: [{ type: 'text', text: 'Background subagent agent-1 finished and will do no further work unless you send it more.\nIts closing message:\nDone.' }],
+      source: { kind: 'subagent-settled', senderSessionId: 'agent-1' }, role: 'user',
+    } },
+  ];
+
+  const detail = detailDsh('/tmp/session.jsonl.zstd', rows.map(JSON.stringify).join('\n'));
+  assert.deepEqual(detail.map(message => [message.role, message.event || null]), [
+    ['runtime_context', null], ['todo', null], ['subagent', 'started'], ['subagent', 'completed'],
+  ]);
+  assert.equal(detail[1].todos[1].status, 'in_progress');
+  assert.equal(detail[2].title, 'Review parser');
+  assert.equal(detail[3].agentId, 'agent-1');
+  assert.equal(detail[3].title, 'Subagent');
+  assert.equal(detail[3].text, 'Done.');
+});
+
 test('extracts Codex thinking effort from turn context', () => {
   const rows = [
     { type: 'session_meta', timestamp: '2026-07-17T00:00:00Z',
@@ -367,6 +445,21 @@ test('normalizes provider and dated model aliases', () => {
   assert.equal(normalizeModelName('openai/gpt-5.6-sol'), 'gpt-5.6-sol');
   assert.equal(normalizeModelName('azure-gpt-5.4-2026-03-05'), 'gpt-5.4');
   assert.equal(priceForModel('anthropic/claude-opus-4-8').input, 5);
+});
+
+test('uses DeepSeek peak and off-peak prices after the scheduled change', () => {
+  const before = priceForModel('deepseek-v4-pro', {}, new Date('2026-08-16T15:59:59Z'));
+  assert.deepEqual([before.cached, before.input, before.output], [.003625, .435, .87]);
+
+  const flashPeak = priceForModel('deepseek-v4-flash', {}, new Date('2026-08-17T02:00:00Z'));
+  assert.deepEqual([flashPeak.cached, flashPeak.input, flashPeak.output], [.014, .44, 1.32]);
+  const flashOffPeak = priceForModel('deepseek-chat', {}, new Date('2026-08-17T05:00:00Z'));
+  assert.deepEqual([flashOffPeak.cached, flashOffPeak.input, flashOffPeak.output], [.007, .22, .66]);
+
+  const proPeak = priceForModel('deepseek-v4-pro', {}, new Date('2026-08-17T08:00:00Z'));
+  assert.deepEqual([proPeak.cached, proPeak.input, proPeak.output], [.044, 1.32, 3.96]);
+  const proOffPeak = priceForModel('deepseek-v4-pro', {}, new Date('2026-08-17T12:00:00Z'));
+  assert.deepEqual([proOffPeak.cached, proOffPeak.input, proOffPeak.output], [.022, .66, 1.98]);
 });
 
 test('normalizes thinking effort from runtime-specific configurations', () => {
