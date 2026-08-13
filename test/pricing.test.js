@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
+const fs = require('node:fs');
 
 const {
   attachSubagentEvents,
@@ -29,6 +30,19 @@ const {
   summarizeOpenClaw,
   summarizeUsageRecords,
 } = require('../server');
+
+test('renders Codex attachment envelopes as a collapsed compact list', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  assert.match(html, /function renderUserMarkdown\(text\)/);
+  assert.match(html, /Files mentioned by the user:[\s\S]*?My request:/);
+  assert.match(html, /<details|el\('details', 'user-attachments'\)/);
+  assert.match(html, /m\.role === 'user' \? renderUserMarkdown\(m\.text\)/);
+});
+
+test('prevents iOS from enlarging individual diff lines', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  assert.match(html, /\.edit-diff\s*\{[^}]*-webkit-text-size-adjust:\s*none;[^}]*text-size-adjust:\s*none;/s);
+});
 
 test('links Hermes subagents to their main session so the list can hide them', () => {
   const child = decorateHermesSummary(
