@@ -660,6 +660,7 @@ function summarizeDsh(file, stat, content) {
   const usageRecords = [];
   const activityByDay = new Map();
   const spawnedAgentIds = new Set();
+  let goalObjective = null, hasGoalEvent = false;
   let sessionKind = 'agent', subagentType = null;
 
   for (const l of lines) {
@@ -684,7 +685,12 @@ function summarizeDsh(file, stat, content) {
       contextTokens = null;
     } else if (l.type === 'user/message') {
       const text = extractText(d.content);
-      if (text && !parseDshBackgroundTask(d) && !parseDshGoalEvent(d) && !parseDshRuntimeContext(d) &&
+      const goalEvent = parseDshGoalEvent(d);
+      if (goalEvent) {
+        hasGoalEvent = true;
+        goalObjective = goalEvent.objective || goalObjective;
+      }
+      if (text && !parseDshBackgroundTask(d) && !goalEvent && !parseDshRuntimeContext(d) &&
           !isNoiseUserText(text) && !isDshCompactionMessage(text)) {
         userCount++;
         if (!firstUserText) firstUserText = text;
@@ -714,7 +720,9 @@ function summarizeDsh(file, stat, content) {
       if (match) spawnedAgentIds.add(match[1]);
     }
   }
-  if (!firstUserText && !agentCount) return null;
+  // Goal-driven sessions can spend a long time emitting only reasoning and
+  // tool calls. Keep them visible even before the first plain-text response.
+  if (!firstUserText && !agentCount && !hasGoalEvent) return null;
   const totals = summarizeUsageRecords(usageRecords);
   return {
     source: 'dsh',
@@ -723,7 +731,7 @@ function summarizeDsh(file, stat, content) {
     id: sessionId,
     file,
     project: cwd || '(未知项目)',
-    title: truncate(title || firstUserText || '(无标题)', 80),
+    title: truncate(title || firstUserText || goalObjective || '(无标题)', 80),
     lastMessage: truncate(lastAgentText || '', 120),
     firstTs, lastTs,
     turns: userCount + agentCount,
@@ -1591,9 +1599,11 @@ function detailHermesRows(rows) {
 // ---------- 会话详情 ----------
 
 function extractEditCall(name, raw) {
-  if (!['edit', 'patch'].includes(shortToolName(name))) return null;
+  const tool = shortToolName(name);
+  if (!['edit', 'patch', 'str_replace_editor'].includes(tool)) return null;
   const args = parseToolArgs(raw);
   if (!args) return null;
+  if (tool === 'str_replace_editor' && args.command !== 'str_replace') return null;
   if (Array.isArray(args.edits)) {
     const edits = args.edits.filter(edit => edit &&
       typeof edit.oldText === 'string' && typeof edit.newText === 'string')
@@ -1605,8 +1615,9 @@ function extractEditCall(name, raw) {
       replaceAll: false,
     };
   }
-  const oldText = args.old_string ?? args.oldText;
-  const newText = args.new_string ?? args.newText;
+  const oldText = args.old_string ?? args.oldText ?? args.old_str;
+  const newText = args.new_string ?? args.newText ?? args.new_str ??
+    (tool === 'str_replace_editor' ? '' : undefined);
   if (typeof oldText !== 'string' || typeof newText !== 'string') return null;
   return {
     path: String(args.file_path ?? args.path ?? ''),
@@ -1640,9 +1651,23 @@ function extractBashCall(name, raw) {
 }
 
 function extractWriteCall(name, raw) {
-  if (!['write', 'write_file', 'writefile'].includes(shortToolName(name))) return null;
+  const tool = shortToolName(name);
+  if (!['write', 'write_file', 'writefile', 'str_replace_editor'].includes(tool)) return null;
   const args = parseToolArgs(raw);
-  if (!args || typeof args.content !== 'string') return null;
+  if (!args) return null;
+  if (tool === 'str_replace_editor') {
+    if (args.command === 'create' && typeof args.file_text === 'string') {
+      return { path: String(args.path ?? ''), content: args.file_text };
+    }
+    if (args.command === 'insert' && typeof args.new_str === 'string') {
+      return {
+        path: String(args.path ?? ''), content: args.new_str,
+        insertLine: Number.isFinite(Number(args.insert_line)) ? Number(args.insert_line) : null,
+      };
+    }
+    return null;
+  }
+  if (typeof args.content !== 'string') return null;
   return {
     path: String(args.file_path ?? args.path ?? ''),
     content: args.content,
@@ -1650,9 +1675,19 @@ function extractWriteCall(name, raw) {
 }
 
 function extractReadCall(name, raw) {
-  if (!isReadToolName(name)) return null;
+  const tool = shortToolName(name);
+  if (!isReadToolName(name) && tool !== 'str_replace_editor') return null;
   const args = parseToolArgs(raw);
   if (!args) return null;
+  if (tool === 'str_replace_editor') {
+    if (args.command !== 'view') return null;
+    const range = Array.isArray(args.view_range) ? args.view_range : [];
+    return {
+      path: String(args.path ?? ''), offset: null, limit: null, pages: null,
+      startLine: Number.isFinite(Number(range[0])) ? Number(range[0]) : null,
+      endLine: Number.isFinite(Number(range[1])) ? Number(range[1]) : null,
+    };
+  }
   return {
     path: String(args.file_path ?? args.path ?? args.file ?? ''),
     offset: args.offset == null ? null : Number(args.offset),
@@ -1704,7 +1739,20 @@ function detailClaude(file, content) {
   }
 
   for (const l of lines) {
-    if (l.isSidechain && !isSubagent) continue;
+    // Claude Code persists /btw exchanges as sidechain messages in the main
+    // transcript. Agent sidechains carry an agentId and are rendered from their
+    // own transcript instead, so keep those out of the parent conversation.
+    if (l.isSidechain && !isSubagent) {
+      if (l.agentId || !l.message) continue;
+      const text = extractText(l.message.content).trim();
+      if (!text || isNoiseUserText(text)) continue;
+      if (l.type === 'user' && !l.isMeta) {
+        msgs.push({ role: 'btw', speaker: 'user', text, ts: l.timestamp });
+      } else if (l.type === 'assistant') {
+        msgs.push({ role: 'btw', speaker: 'assistant', text, ts: l.timestamp });
+      }
+      continue;
+    }
     if (l.type === 'system' && l.subtype === 'compact_boundary') {
       const metadata = l.compactMetadata || {};
       pendingCompaction = {

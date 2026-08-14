@@ -63,6 +63,9 @@
   .msg .meta { font-size: 11px; color: var(--dim); margin-bottom: 3px; }
   .msg .bubble { padding: 8px 12px; border-radius: 8px; word-break: break-word; }
   .msg.user .bubble { background: #26314a; border: 1px solid #35476b; }
+  .msg.btw .meta { color: var(--claude); }
+  .msg.btw.user .bubble { background: rgba(217,119,87,.09); border: 1px solid rgba(217,119,87,.38); }
+  .msg.btw.assistant .bubble { background: var(--panel); border: 1px solid rgba(217,119,87,.28); }
   .user-attachments { margin: 0 0 7px; color: var(--dim); font-size: 12px; }
   .user-attachments > summary { cursor: pointer; user-select: none; }
   .user-attachments-list { margin-top: 5px; padding-left: 18px; }
@@ -297,7 +300,7 @@ const MESSAGES = {
     backgroundTaskCompleted: 'Background task completed', backgroundTaskStatus: 'Background task: {status}', exitCode: 'exit {code}',
     goalCreated: 'Goal created', goalCompleted: 'Goal completed', goalBlocked: 'Goal blocked', goalPaused: 'Goal paused',
     goalResumed: 'Goal resumed', goalUpdated: 'Goal updated', goalRound: 'Goal round {round}', blockedReason: 'Blocked: {reason}', todoUpdated: 'Task list updated',
-    runtimeContext: 'Runtime context',
+    runtimeContext: 'Runtime context', btwQuestion: '/btw · User', btwAnswer: '/btw · Assistant',
     agentFailed: 'Agent failed', agentTimeout: 'Agent timed out', agentCancelled: 'Agent cancelled', agentAborted: 'Agent aborted', agentStatus: 'Agent status',
     viewSubagent: 'View subagent log', automatic: 'automatic', manual: 'manual', beforeCompaction: '{n} tokens before compaction', compacted: 'Context compacted',
     noMessages: 'No messages to display', loadFailed: 'Failed to load: {error}', jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun',
@@ -325,7 +328,7 @@ const MESSAGES = {
     backgroundTaskCompleted: '后台任务已完成', backgroundTaskStatus: '后台任务：{status}', exitCode: '退出码 {code}',
     goalCreated: '目标已创建', goalCompleted: '目标已完成', goalBlocked: '目标受阻', goalPaused: '目标已暂停',
     goalResumed: '目标已恢复', goalUpdated: '目标已更新', goalRound: '目标轮次 {round}', blockedReason: '受阻原因：{reason}', todoUpdated: '任务清单已更新',
-    runtimeContext: '运行环境',
+    runtimeContext: '运行环境', btwQuestion: '/btw · 用户', btwAnswer: '/btw · 助手',
     agentFailed: 'Agent 失败', agentTimeout: 'Agent 超时', agentCancelled: 'Agent 已取消', agentAborted: 'Agent 已中止', agentStatus: 'Agent 状态',
     viewSubagent: '点击查看 subagent 记录', automatic: '自动', manual: '手动', beforeCompaction: '压缩前 {n} tokens', compacted: '上下文已压缩',
     noMessages: '没有可显示的消息', loadFailed: '加载失败：{error}', jan: '1月', feb: '2月', mar: '3月', apr: '4月', may: '5月', jun: '6月',
@@ -632,7 +635,9 @@ function renderEditDiff(edit) {
 
 function renderWriteDiff(write) {
   const diff = el('div', 'edit-diff');
-  diff.appendChild(el('div', 'edit-diff-head', write.path || 'Write'));
+  const title = (write.path || 'Write') +
+    (Number.isFinite(write.insertLine) ? ' · after line ' + write.insertLine : '');
+  diff.appendChild(el('div', 'edit-diff-head', title));
   String(write.content).split('\n').forEach(line => {
     const row = el('div', 'edit-diff-line add');
     row.appendChild(el('span', 'edit-diff-mark', '+'));
@@ -651,6 +656,10 @@ function renderBash(text) {
 
 function readLabel(read) {
   const parts = [read.path || 'Read'];
+  if (Number.isFinite(read.startLine)) {
+    parts.push('lines ' + read.startLine + (Number.isFinite(read.endLine) && read.endLine !== -1
+      ? '–' + read.endLine : '+'));
+  }
   if (Number.isFinite(read.offset)) parts.push(t('offset') + ' ' + read.offset);
   if (Number.isFinite(read.limit)) parts.push(t('limit') + ' ' + read.limit);
   if (read.pages) parts.push(t('pages') + ' ' + read.pages);
@@ -1511,6 +1520,16 @@ async function openSession(s, keepScroll) {
         const content = el('div', 'compaction-content');
         content.appendChild(renderMarkdown(m.text, 'markdown-body'));
         box.appendChild(content);
+        main.appendChild(box);
+        i++;
+        continue;
+      }
+      if (m.role === 'btw') {
+        const speaker = m.speaker === 'user' ? 'user' : 'assistant';
+        const box = el('div', 'msg btw ' + speaker);
+        const label = speaker === 'user' ? t('btwQuestion') : t('btwAnswer');
+        box.appendChild(el('div', 'meta', label + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
+        box.appendChild(speaker === 'user' ? renderUserMarkdown(m.text) : renderMarkdown(m.text));
         main.appendChild(box);
         i++;
         continue;

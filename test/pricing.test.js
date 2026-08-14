@@ -237,6 +237,70 @@ test('parses DeepSeek Harness summaries and message details', () => {
   assert.equal(detail.filter(message => message.role === 'tool_result').length, 1);
 });
 
+test('keeps an active DeepSeek Harness goal session before it emits plain text', () => {
+  const rows = [
+    { type: 'session', id: 'goal-session', createdAt: 1786728202863, cwd: '/tmp/dsh-goal' },
+    { type: 'user/message', time: 1786729499568, data: {
+      source: { kind: 'goal', goalId: 'goal-example', round: 1 },
+      content: [{ type: 'text', text: '<goal_round>\nObjective: "Build the kernel"\nRound: 1/10\n</goal_round>' }],
+    } },
+    { type: 'assistant/message', time: 1786729502698, data: { message: {
+      source: { model: 'deepseek-v4-pro' },
+      content: [
+        { type: 'reasoning', text: 'Inspect the workspace first.' },
+        { type: 'tool-call', name: 'bash', arguments: '{"command":"pwd"}' },
+      ],
+    } } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeDsh('/tmp/goal-session/session.jsonl.zstd', { size: content.length }, content);
+
+  assert.ok(summary);
+  assert.equal(summary.id, 'goal-session');
+  assert.equal(summary.title, 'Build the kernel');
+  assert.equal(summary.turns, 0);
+  assert.equal(summary.model, 'deepseek-v4-pro');
+});
+
+test('preserves DeepSeek str_replace_editor commands for specialized rendering', () => {
+  const calls = [
+    { type: 'tool/call', time: 1785515765000, data: {
+      callId: 'replace-1', name: 'str_replace_editor', arguments: JSON.stringify({
+        command: 'str_replace', path: '/tmp/example.js', old_str: 'const old = true;\n',
+        new_str: 'const updated = true;\n',
+      }),
+    } },
+    { type: 'tool/call', time: 1785515765001, data: {
+      callId: 'create-1', name: 'str_replace_editor', arguments: JSON.stringify({
+        command: 'create', path: '/tmp/new.txt', file_text: 'first\nsecond\n',
+      }),
+    } },
+    { type: 'tool/call', time: 1785515765002, data: {
+      callId: 'insert-1', name: 'str_replace_editor', arguments: JSON.stringify({
+        command: 'insert', path: '/tmp/example.js', insert_line: 8, new_str: 'inserted();\n',
+      }),
+    } },
+    { type: 'tool/call', time: 1785515765003, data: {
+      callId: 'view-1', name: 'str_replace_editor', arguments: JSON.stringify({
+        command: 'view', path: '/tmp/example.js', view_range: [10, 25],
+      }),
+    } },
+  ];
+  const detail = detailDsh('/tmp/editor/session.jsonl.zstd', calls.map(JSON.stringify).join('\n'));
+
+  assert.deepEqual(detail[0].edit, {
+    path: '/tmp/example.js', oldText: 'const old = true;\n',
+    newText: 'const updated = true;\n', replaceAll: false,
+  });
+  assert.deepEqual(detail[1].write, { path: '/tmp/new.txt', content: 'first\nsecond\n' });
+  assert.deepEqual(detail[2].write, {
+    path: '/tmp/example.js', content: 'inserted();\n', insertLine: 8,
+  });
+  assert.deepEqual(detail[3].read, {
+    path: '/tmp/example.js', offset: null, limit: null, pages: null, startLine: 10, endLine: 25,
+  });
+});
+
 test('links DeepSeek Harness subagent sessions to their parent', () => {
   const parentRows = [
     { type: 'session', id: 'parent', cwd: '/tmp/project' },
@@ -726,6 +790,33 @@ test('parses Claude Code sidechain rows when they are in a subagent transcript',
   assert.equal(summary.project, '/tmp/project');
   assert.equal(summary.turns, 2);
   assert.deepEqual(detailClaude(file, content).map(m => m.role), ['user', 'assistant']);
+});
+
+test('renders Claude Code /btw sidechain messages in the main transcript', () => {
+  const rows = [
+    { type: 'user', isSidechain: true, timestamp: '2026-08-15T00:00:00Z',
+      message: { role: 'user', content: 'What does this option do?' } },
+    { type: 'assistant', isSidechain: true, timestamp: '2026-08-15T00:00:01Z',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'It enables the example behavior.' }] } },
+    { type: 'assistant', isSidechain: true, agentId: 'example-agent',
+      timestamp: '2026-08-15T00:00:02Z', message: {
+        role: 'assistant', content: [{ type: 'text', text: 'Agent-internal response.' }],
+      } },
+  ];
+
+  const detail = detailClaude('/tmp/example-project/main.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.deepEqual(detail, [
+    { role: 'btw', speaker: 'user', text: 'What does this option do?', ts: '2026-08-15T00:00:00Z' },
+    { role: 'btw', speaker: 'assistant', text: 'It enables the example behavior.', ts: '2026-08-15T00:00:01Z' },
+  ]);
+});
+
+test('renders /btw messages with dedicated labels and styling', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  assert.match(html, /if \(m\.role === 'btw'\)/);
+  assert.match(html, /btwQuestion: '\/btw · User'/);
+  assert.match(html, /\.msg\.btw \.meta/);
 });
 
 test('renders Claude Code subagent launch and completion as agent events', () => {
