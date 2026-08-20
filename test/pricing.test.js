@@ -44,6 +44,16 @@ test('prevents iOS from enlarging individual diff lines', () => {
   assert.match(html, /\.edit-diff\s*\{[^}]*-webkit-text-size-adjust:\s*none;[^}]*text-size-adjust:\s*none;/s);
 });
 
+test('allows the aggregated other model slice to expand into model details', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  assert.match(html, /const rawTotals = new Map\(\)/);
+  assert.match(html, /const slices = otherValue > 0 \? \[\.\.\.top, \[other, otherValue\]\] : top/);
+  assert.match(html, /otherDetails\.hidden = !expanded/);
+  assert.match(html, /row\.onclick = toggleOtherDetails/);
+  assert.match(html, /path\.addEventListener\('click', toggleOtherDetails\)/);
+  assert.match(html, /for \(const \[model, modelValue\] of otherModels\)/);
+});
+
 test('links Hermes subagents to their main session so the list can hide them', () => {
   const child = decorateHermesSummary(
     { source: 'hermes', id: 'child', file: 'hermes:child' },
