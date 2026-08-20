@@ -535,6 +535,12 @@ test('normalizes provider and dated model aliases', () => {
   assert.equal(priceForModel('anthropic/claude-opus-4-8').input, 5);
 });
 
+test('uses the published GLM 5.3 token prices', () => {
+  const price = priceForModel('glm-5.3');
+  assert.equal(price.name, 'GLM 5.3');
+  assert.deepEqual([price.input, price.cached, price.output], [1.4, .26, 4.4]);
+});
+
 test('uses DeepSeek peak and off-peak prices after the scheduled change', () => {
   const before = priceForModel('deepseek-v4-pro', {}, new Date('2026-08-16T15:59:59Z'));
   assert.deepEqual([before.cached, before.input, before.output], [.003625, .435, .87]);

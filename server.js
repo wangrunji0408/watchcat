@@ -65,7 +65,7 @@ function truncateBlock(s, n) {
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
-// 更新于 2026-08-13：
+// 更新于 2026-08-20：
 // OpenAI: https://developers.openai.com/api/docs/pricing
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
@@ -110,7 +110,8 @@ const MODEL_PRICES = [
   { test: /moonshot[-.]v1[-.]32k(?:\b|$)/, name: 'Moonshot V1 32K', input: 1, output: 3 },
   { test: /moonshot[-.]v1[-.]8k(?:\b|$)/, name: 'Moonshot V1 8K', input: .2, output: 2 },
   { test: /moonshot[-.]v1(?:\b|$)/, name: 'Moonshot V1', input: 1, output: 3 },
-  // GLM: https://z.ai/models/glm-5.2
+  // GLM: https://docs.z.ai/guides/overview/pricing
+  { test: /glm[-.]5[-.]3(?:\b|$)/, name: 'GLM 5.3', input: 1.4, cached: .26, output: 4.4 },
   { test: /glm[-.]5[-.]2(?:\b|$)/, name: 'GLM 5.2', input: 1.4, cached: .26, output: 4.4 },
 ];
 
