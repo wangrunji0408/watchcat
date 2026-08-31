@@ -67,6 +67,15 @@ test('links Hermes subagents to their main session so the list can hide them', (
   assert.equal(child.subagentType, 'hermes');
 });
 
+test('does not nest continued Hermes channel sessions as subagents', () => {
+  const session = { source: 'hermes', id: 'next', file: 'hermes:next' };
+  const decorated = decorateHermesSummary(session, 'previous', 'weixin');
+
+  assert.equal(decorated, session);
+  assert.equal(decorated.sessionKind, undefined);
+  assert.equal(decorated.parentFile, undefined);
+});
+
 test('recursively includes subagent usage and cost in parent sessions', () => {
   const usage = (inputTokens) => ({ inputTokens, cachedInputTokens: 0, cacheWriteTokens: 0,
     cacheWrite1hTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: inputTokens, requests: 1 });
@@ -563,21 +572,6 @@ test('normalizes thinking effort from runtime-specific configurations', () => {
   assert.equal(extractThinkingEffort({ reasoning_config: null }), null);
 });
 
-test('prices Codex uncached, cached, and output tokens separately', () => {
-  const usage = normalizedUsage({
-    input_tokens: 19_000,
-    cached_input_tokens: 9_984,
-    output_tokens: 314,
-    total_tokens: 19_314,
-  }, 'codex');
-  const result = summarizeUsageRecords([{ model: 'gpt-5.6-sol', usage }]);
-
-  assert.equal(usage.inputTokens, 9_016);
-  assert.equal(usage.cachedInputTokens, 9_984);
-  assert.equal(result.cost.usd, 0.059492);
-  assert.equal(result.cost.complete, true);
-});
-
 test('uses long-context prices above 272K input tokens', () => {
   const usage = normalizedUsage({ input_tokens: 300_000, output_tokens: 1_000 }, 'codex');
   const result = summarizeUsageRecords([{ model: 'gpt-5.4', usage }]);
@@ -593,6 +587,61 @@ test('uses the current GPT-5.6 Luna prices, including cache writes', () => {
   const longUsage = normalizedUsage({ input_tokens: 300_000, output_tokens: 1_000_000, cache_write_tokens: 100_000 }, 'codex');
   const long = summarizeUsageRecords([{ model: 'gpt-5.6-luna', usage: longUsage }]);
   assert.equal(long.cost.usd, 1.97);
+});
+
+test('prices GPT-5.6 Terra and Luna: old rates before the 2026-07-30 reduction, current rates after', () => {
+  const terraBefore = priceForModel('gpt-5.6-terra', {}, new Date('2026-07-29T23:59:59Z'));
+  assert.deepEqual([terraBefore.input, terraBefore.cached, terraBefore.output, terraBefore.long], [2.5, .25, 15, [5, .5, 22.5]]);
+  const terraAfter = priceForModel('gpt-5.6-terra', {}, new Date('2026-07-30T00:00:00Z'));
+  assert.deepEqual([terraAfter.input, terraAfter.cached, terraAfter.cacheWrite5m, terraAfter.output, terraAfter.long], [2, .2, 2.5, 12, [4, .4, 18]]);
+
+  const lunaBefore = priceForModel('gpt-5.6-luna', {}, new Date('2026-07-29T23:59:59Z'));
+  assert.deepEqual([lunaBefore.input, lunaBefore.cached, lunaBefore.output, lunaBefore.long], [1, .1, 6, [2, .2, 9]]);
+  const lunaAfter = priceForModel('gpt-5.6-luna', {}, new Date('2026-07-30T00:00:00Z'));
+  assert.deepEqual([lunaAfter.input, lunaAfter.cached, lunaAfter.cacheWrite5m, lunaAfter.output, lunaAfter.long], [.2, .02, .25, 1.2, [.4, .04, 1.8]]);
+
+  const usage = normalizedUsage({ input_tokens: 300_000, output_tokens: 1_000_000, cache_write_tokens: 100_000 }, 'codex');
+  const oldTerra = summarizeUsageRecords([{ model: 'gpt-5.6-terra', usage, ts: '2026-07-29T12:00:00Z' }]);
+  assert.equal(oldTerra.cost.usd, 24.5);
+  const newTerra = summarizeUsageRecords([{ model: 'gpt-5.6-terra', usage, ts: '2026-07-30T12:00:00Z' }]);
+  assert.equal(newTerra.cost.usd, 19.7);
+  const oldLuna = summarizeUsageRecords([{ model: 'gpt-5.6-luna', usage, ts: '2026-07-29T12:00:00Z' }]);
+  assert.equal(oldLuna.cost.usd, 9.8);
+});
+
+test('prices GPT-5.6 Sol: old rates before the 2026-08-21 promotion, promotional rates after', () => {
+  const before = priceForModel('gpt-5.6-sol', {}, new Date('2026-08-20T23:59:59Z'));
+  assert.deepEqual([before.input, before.cached, before.output, before.long], [5, .5, 30, [10, 1, 45]]);
+  assert.equal(before.cacheWrite5m, undefined);
+  const after = priceForModel('gpt-5.6-sol', {}, new Date('2026-08-21T00:00:00Z'));
+  assert.equal(after.input, 4);
+  assert.equal(after.output, 20);
+
+  // 8-21 之前的会话按原价计费
+  const oldUsage = normalizedUsage({ input_tokens: 300_000, output_tokens: 1_000_000, cache_write_tokens: 100_000 }, 'codex');
+  const old = summarizeUsageRecords([{ model: 'gpt-5.6-sol', usage: oldUsage, ts: '2026-08-20T12:00:00Z' }]);
+  assert.equal(old.cost.usd, 49);
+
+  // 当前推广价：Codex 用量按未缓存/缓存/输出分开计费
+  const usage = normalizedUsage({
+    input_tokens: 19_000,
+    cached_input_tokens: 9_984,
+    output_tokens: 314,
+    total_tokens: 19_314,
+  }, 'codex');
+  assert.equal(usage.inputTokens, 9_016);
+  assert.equal(usage.cachedInputTokens, 9_984);
+  const result = summarizeUsageRecords([{ model: 'gpt-5.6-sol', usage }]);
+  assert.equal(result.cost.usd, 0.0463376);
+  assert.equal(result.cost.complete, true);
+
+  const shortUsage = normalizedUsage({ input_tokens: 100_000, cached_input_tokens: 10_000, output_tokens: 100_000 }, 'codex');
+  const short = summarizeUsageRecords([{ model: 'gpt-5.6-sol', usage: shortUsage }]);
+  assert.equal(short.cost.usd, 2.364);
+
+  const longUsage = normalizedUsage({ input_tokens: 300_000, output_tokens: 1_000_000, cache_write_tokens: 100_000 }, 'codex');
+  const long = summarizeUsageRecords([{ model: 'gpt-5.6-sol', usage: longUsage }]);
+  assert.equal(long.cost.usd, 33.4);
 });
 
 test('deduplicates repeated Claude log entries by message id', () => {

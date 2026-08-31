@@ -65,13 +65,15 @@ function truncateBlock(s, n) {
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
-// 更新于 2026-08-20：
+// 更新于 2026-08-23：
 // OpenAI: https://developers.openai.com/api/docs/pricing
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
 const MODEL_PRICES = [
-  { test: /gpt[-.]5[-.]6[-.]sol(?:\b|$)/, name: 'GPT 5.6 Sol', input: 5, cached: .5, output: 30, long: [10, 1, 45] },
-  { test: /gpt[-.]5[-.]6[-.]terra(?:\b|$)/, name: 'GPT 5.6 Terra', input: 2.5, cached: .25, output: 15, long: [5, .5, 22.5] },
+  // GPT 5.6 Sol 官方推广价（2026-08-21 起，至少持续至 2026-11-21）
+  { test: /gpt[-.]5[-.]6[-.]sol(?:\b|$)/, name: 'GPT 5.6 Sol', input: 4, cached: .4, cacheWrite5m: 5, cacheWrite1h: 5, output: 20, long: [8, .8, 30], longCacheWrite5m: 10, longCacheWrite1h: 10 },
+  // GPT 5.6 Terra/Luna 当前价格（2026-07-30 起）
+  { test: /gpt[-.]5[-.]6[-.]terra(?:\b|$)/, name: 'GPT 5.6 Terra', input: 2, cached: .2, cacheWrite5m: 2.5, cacheWrite1h: 2.5, output: 12, long: [4, .4, 18], longCacheWrite5m: 5, longCacheWrite1h: 5 },
   { test: /gpt[-.]5[-.]6[-.]luna(?:\b|$)/, name: 'GPT 5.6 Luna', input: .2, cached: .02, cacheWrite5m: .25, cacheWrite1h: .25, output: 1.2, long: [.4, .04, 1.8], longCacheWrite5m: .5, longCacheWrite1h: .5 },
   { test: /gpt[-.]5[-.]5[-.]pro(?:\b|$)/, name: 'GPT 5.5 Pro', input: 30, output: 180, long: [60, null, 270] },
   { test: /gpt[-.]5[-.]5(?:\b|$)/, name: 'GPT 5.5', input: 5, cached: .5, output: 30, long: [10, 1, 45] },
@@ -145,6 +147,26 @@ function priceForModel(model, usage = {}, now = new Date()) {
     return promotional
       ? { name: 'Claude Sonnet 5', input: 2, cacheWrite5m: 2.5, cacheWrite1h: 4, cached: .2, output: 10 }
       : { name: 'Claude Sonnet 5', input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cached: .3, output: 15 };
+  }
+  // GPT 5.6 Sol 官方推广价自 2026-08-21 起生效，此前的会话按原价计费。
+  if (/gpt[-.]5[-.]6[-.]sol(?:\b|$)/.test(normalized)) {
+    const promotional = now >= new Date('2026-08-21T00:00:00Z');
+    return promotional
+      ? { name: 'GPT 5.6 Sol', input: 4, cached: .4, cacheWrite5m: 5, cacheWrite1h: 5, output: 20, long: [8, .8, 30], longCacheWrite5m: 10, longCacheWrite1h: 10 }
+      : { name: 'GPT 5.6 Sol', input: 5, cached: .5, output: 30, long: [10, 1, 45] };
+  }
+  // GPT 5.6 Terra/Luna 降价自 2026-07-30 起生效，此前的会话按原价计费。
+  if (/gpt[-.]5[-.]6[-.]terra(?:\b|$)/.test(normalized)) {
+    const reduced = now >= new Date('2026-07-30T00:00:00Z');
+    return reduced
+      ? { name: 'GPT 5.6 Terra', input: 2, cached: .2, cacheWrite5m: 2.5, cacheWrite1h: 2.5, output: 12, long: [4, .4, 18], longCacheWrite5m: 5, longCacheWrite1h: 5 }
+      : { name: 'GPT 5.6 Terra', input: 2.5, cached: .25, output: 15, long: [5, .5, 22.5] };
+  }
+  if (/gpt[-.]5[-.]6[-.]luna(?:\b|$)/.test(normalized)) {
+    const reduced = now >= new Date('2026-07-30T00:00:00Z');
+    return reduced
+      ? { name: 'GPT 5.6 Luna', input: .2, cached: .02, cacheWrite5m: .25, cacheWrite1h: .25, output: 1.2, long: [.4, .04, 1.8], longCacheWrite5m: .5, longCacheWrite1h: .5 }
+      : { name: 'GPT 5.6 Luna', input: 1, cached: .1, output: 6, long: [2, .2, 9] };
   }
   let price = MODEL_PRICES.find(p => p.test.test(normalized));
   if (!price) return null;
@@ -1369,7 +1391,10 @@ function hermesGatewayAlive() {
 }
 
 function decorateHermesSummary(summary, parentSessionId, sessionSource) {
-  if (!parentSessionId && sessionSource !== 'subagent') return summary;
+  // Hermes also uses parent_session_id to link continued channel sessions
+  // (for example, consecutive weixin sessions). Only actual subagent rows
+  // should be nested under another session in Watchcat.
+  if (sessionSource !== 'subagent') return summary;
   return {
     ...summary,
     sessionKind: 'subagent',
