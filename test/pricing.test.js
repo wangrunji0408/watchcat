@@ -538,6 +538,36 @@ test('recognizes Codex auto-review as a guardian subagent', () => {
   assert.equal(review.parentFile, '/tmp/parent.jsonl');
 });
 
+test('summarizes newer Codex thread_spawn subagents without plaintext messages', () => {
+  const rows = [
+    { type: 'session_meta', timestamp: '2026-09-03T00:00:00Z', payload: {
+      id: 'child-1', parent_thread_id: 'parent-1', cwd: '/tmp/project',
+      thread_source: 'subagent', source: { subagent: { thread_spawn: {
+        parent_thread_id: 'parent-1', agent_path: '/root/test_x64', agent_nickname: 'Euler',
+      } } },
+    } },
+    { type: 'session_meta', timestamp: '2026-09-03T00:00:00Z', payload: {
+      id: 'parent-1', cwd: '/tmp/project',
+    } },
+    { type: 'event_msg', timestamp: '2026-09-03T00:00:00Z', payload: {
+      type: 'user_message', message: 'copied parent history',
+    } },
+    { type: 'event_msg', timestamp: '2026-09-03T00:00:01Z', payload: { type: 'task_started' } },
+    { type: 'inter_agent_communication', timestamp: '2026-09-03T00:00:02Z', payload: {
+      author: '/root', recipient: '/root/test_x64', encrypted_content: 'opaque',
+    } },
+    { type: 'event_msg', timestamp: '2026-09-03T00:00:03Z', payload: { type: 'task_complete' } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const child = summarizeCodex('/tmp/child.jsonl', { size: content.length }, content);
+
+  assert.equal(child.sessionKind, 'subagent');
+  assert.equal(child.parentSessionId, 'parent-1');
+  assert.equal(child.title, 'test_x64');
+  assert.equal(child.subagentType, 'Euler');
+  assert.equal(child.turns, 0);
+});
+
 test('normalizes provider and dated model aliases', () => {
   assert.equal(normalizeModelName('openai/gpt-5.6-sol'), 'gpt-5.6-sol');
   assert.equal(normalizeModelName('azure-gpt-5.4-2026-03-05'), 'gpt-5.4');
@@ -937,6 +967,25 @@ test('remote scans retain subagents belonging to selected parent sessions', () =
   assert.ok(scan.files.some(file => file.path.endsWith('/session-2/subagents/agent-example.jsonl')));
 });
 
+test('remote scans retain independent Codex subagent logs for selected parents', () => {
+  const lines = [];
+  for (let i = 0; i < 11; i++) {
+    lines.push(`FILE\tcodex\t${100 - i}\t10\t/remote/parent-${i}.jsonl`);
+    const meta = Buffer.from(JSON.stringify({ payload: { id: `parent-${i}` } })).toString('base64');
+    lines.push(`CODEX_META\t/remote/parent-${i}.jsonl\t${meta}`);
+  }
+  lines.push('FILE\tcodex\t1\t5\t/remote/child.jsonl');
+  const childMeta = Buffer.from(JSON.stringify({ payload: {
+    id: 'child-1', parent_thread_id: 'parent-2',
+  } })).toString('base64');
+  lines.push(`CODEX_META\t/remote/child.jsonl\t${childMeta}`);
+
+  const scan = require('../server').parseRemoteScan(lines.join('\n'));
+
+  assert.equal(scan.files.filter(file => !file.path.endsWith('/child.jsonl')).length, 10);
+  assert.ok(scan.files.some(file => file.path.endsWith('/child.jsonl')));
+});
+
 test('preserves structured Edit arguments for diff rendering', () => {
   const edit = {
     type: 'assistant', timestamp: '2026-07-18T00:00:00Z', message: { content: [{
@@ -1126,4 +1175,71 @@ test('extracts text blocks from Codex custom tool call outputs', () => {
 
   assert.equal(detail[1].role, 'tool_result');
   assert.equal(detail[1].output, 'First output line\nSecond output line');
+});
+
+test('unwraps newer Codex exec wrappers into their nested tools', () => {
+  const rows = [
+    { type: 'response_item', timestamp: '2026-09-03T00:00:00Z', payload: {
+      type: 'custom_tool_call', name: 'exec', call_id: 'shell-1',
+      input: 'const r = await tools.exec_command({cmd:"git status --short",workdir:"/tmp/example"}); text(r.output);',
+    } },
+    { type: 'response_item', timestamp: '2026-09-03T00:00:01Z', payload: {
+      type: 'custom_tool_call_output', call_id: 'shell-1', output: 'clean',
+    } },
+    { type: 'response_item', timestamp: '2026-09-03T00:00:02Z', payload: {
+      type: 'custom_tool_call', name: 'exec', call_id: 'patch-1',
+      input: 'const patch = "*** Begin Patch\\n*** Add File: /tmp/example.txt\\n+hello\\n*** End Patch"; text(await tools.apply_patch(patch));',
+    } },
+  ];
+  const detail = detailCodex('/tmp/example-session.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.equal(detail[0].toolName, 'exec_command');
+  assert.equal(detail[0].bash.command, 'git status --short');
+  assert.equal(detail[1].output, 'clean');
+  assert.equal(detail[2].toolName, 'apply_patch');
+  assert.match(detail[2].patch.text, /Add File: \/tmp\/example\.txt/);
+});
+
+test('summarizes parallel commands inside a newer Codex exec wrapper', () => {
+  const rows = [{ type: 'response_item', timestamp: '2026-09-03T00:00:00Z', payload: {
+    type: 'custom_tool_call', name: 'exec', call_id: 'parallel-1',
+    input: 'const rs = await Promise.all([tools.exec_command({cmd:"git status"}), tools.exec_command({cmd:"git diff"})]); text(rs.length);',
+  } }];
+  const [call] = detailCodex('/tmp/example-session.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.equal(call.toolName, 'exec_command ×2');
+  assert.match(call.bash.command, /# 1\ngit status/);
+  assert.match(call.bash.command, /# 2\ngit diff/);
+});
+
+test('keeps direct Codex agent tools recognizable', () => {
+  const rows = [
+    { type: 'response_item', timestamp: '2026-09-03T00:00:00Z', payload: {
+      type: 'function_call', name: 'list_agents', call_id: 'agents-1', arguments: '{}',
+    } },
+    { type: 'response_item', timestamp: '2026-09-03T00:00:01Z', payload: {
+      type: 'function_call_output', call_id: 'agents-1', output: '{"agents":[]}',
+    } },
+  ];
+  const detail = detailCodex('/tmp/example-session.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.equal(detail[0].toolName, 'list_agents');
+  assert.equal(detail[1].output, '{"agents":[]}');
+});
+
+test('renders Codex spawn_agent as a linked subagent event candidate', () => {
+  const rows = [
+    { type: 'response_item', timestamp: '2026-09-03T00:00:00Z', payload: {
+      type: 'function_call', name: 'spawn_agent', call_id: 'spawn-1',
+      arguments: '{"task_name":"test_x64","fork_turns":"all","message":"encrypted"}',
+    } },
+    { type: 'response_item', timestamp: '2026-09-03T00:00:01Z', payload: {
+      type: 'function_call_output', call_id: 'spawn-1', output: '{"task_name":"/root/test_x64"}',
+    } },
+  ];
+  const detail = detailCodex('/tmp/example-session.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.deepEqual(detail.map(message => message.role), ['subagent']);
+  assert.equal(detail[0].agentId, '/root/test_x64');
+  assert.equal(detail[0].title, 'test_x64');
 });

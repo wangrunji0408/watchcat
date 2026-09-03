@@ -577,11 +577,29 @@ function decorateClaudeSubagentSummary(summary) {
   };
 }
 
+function codexOwnSessionLines(lines) {
+  const firstMetaIndex = lines.findIndex(line => line.type === 'session_meta');
+  if (firstMetaIndex < 0) return { lines, subagent: false };
+  const metadata = lines[firstMetaIndex].payload || {};
+  const spawn = metadata.source && metadata.source.subagent && metadata.source.subagent.thread_spawn;
+  const agentPath = spawn && spawn.agent_path;
+  if (!metadata.parent_thread_id || !agentPath) return { lines, subagent: false };
+  const communication = lines.findIndex((line, index) => index > firstMetaIndex &&
+    line.type === 'inter_agent_communication' && line.payload?.recipient === agentPath);
+  if (communication < 0) return { lines: [lines[firstMetaIndex]], subagent: true };
+  let start = communication;
+  while (start > firstMetaIndex + 1 &&
+      !(lines[start].type === 'event_msg' && lines[start].payload?.type === 'task_started')) start--;
+  return { lines: [lines[firstMetaIndex], ...lines.slice(start)], subagent: true };
+}
+
 // Codex 会话摘要
 function summarizeCodex(file, stat, content) {
-  const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  const parsedLines = content == null ? parseLines(file) : parseJsonLines(content);
+  const { lines } = codexOwnSessionLines(parsedLines);
   let cwd = null, sessionId = path.basename(file, '.jsonl'), source = null, model = null;
   let sessionKind = 'agent', parentSessionId = null, subagentType = null;
+  let subagentTitle = null;
   let thinkingEffort = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
   let userCount = 0, agentCount = 0, contextTokens = null;
@@ -601,8 +619,12 @@ function summarizeCodex(file, stat, content) {
         sessionKind = 'subagent';
         parentSessionId = p.parent_thread_id || (p.session_id !== sessionId ? p.session_id : null);
         const subagent = p.source && p.source.subagent;
-        subagentType = typeof subagent === 'string' ? subagent :
-          subagent && (subagent.other || Object.values(subagent)[0]) || null;
+        const spawn = subagent && typeof subagent === 'object' && subagent.thread_spawn;
+        const agentPath = spawn && spawn.agent_path;
+        subagentTitle = agentPath ? path.posix.basename(agentPath) : spawn && spawn.agent_nickname || null;
+        subagentType = typeof subagent === 'string' ? subagent : spawn
+          ? spawn.agent_role || spawn.agent_nickname || 'worker'
+          : subagent && (subagent.other || null);
       }
     }
     if (l.type === 'turn_context') {
@@ -638,7 +660,7 @@ function summarizeCodex(file, stat, content) {
       }
     }
   }
-  if (!firstUserText && !agentCount) return null;
+  if (!firstUserText && !agentCount && sessionKind !== 'subagent') return null;
   const totals = summarizeUsageRecords(usageRecords);
 
   return {
@@ -650,7 +672,7 @@ function summarizeCodex(file, stat, content) {
     project: cwd || '(未知项目)',
     title: sessionKind === 'subagent' && subagentType === 'guardian'
       ? 'Codex auto-review'
-      : truncate(firstUserText || '(无标题)', 80),
+      : truncate(subagentTitle || firstUserText || '(无标题)', 80),
     lastMessage: truncate(lastAgentText || '', 120),
     firstTs, lastTs,
     turns: userCount + agentCount,
@@ -923,6 +945,13 @@ if [ -d "$codex_root" ]; then
   else
     find "$codex_root" -type f -name '*.jsonl' -exec stat -f 'FILE\tcodex\t%m\t%z\t%N' {} + 2>/dev/null
   fi
+  find "$codex_root" -type f -name '*.jsonl' -exec sh -c '
+    for file do
+      printf "CODEX_META\t%s\t" "$file"
+      head -n 1 "$file" 2>/dev/null | head -c 2048 | base64 | tr -d "\n"
+      printf "\n"
+    done
+  ' sh {} + 2>/dev/null
 fi
 if [ -d "$claude_root" ]; then
   if stat -c '%Y' "$claude_root" >/dev/null 2>&1; then
@@ -952,27 +981,54 @@ function remoteClaudeParentPath(file) {
 }
 
 function parseRemoteScan(stdout) {
-  const result = { roots: {}, files: [], openFiles: new Set(), aliveProjects: {} };
+  const result = { roots: {}, files: [], openFiles: new Set(), aliveProjects: {}, codexMeta: new Map() };
   for (const line of stdout.split('\n')) {
     const fields = line.split('\t');
     if (fields[0] === 'ROOT' && fields.length >= 3) result.roots[fields[1]] = fields.slice(2).join('\t');
     else if (fields[0] === 'FILE' && fields.length >= 5) {
       result.files.push({ kind: fields[1], mtimeMs: Number(fields[2]) * 1000, size: Number(fields[3]), path: fields.slice(4).join('\t') });
     } else if (fields[0] === 'OPEN') result.openFiles.add(fields.slice(1).join('\t'));
+    else if (fields[0] === 'CODEX_META' && fields.length >= 3) {
+      const file = fields[1];
+      try {
+        const prefix = Buffer.from(fields.slice(2).join('\t'), 'base64').toString('utf8');
+        const id = prefix.match(/"payload"\s*:\s*\{\s*"(?:id|session_id)"\s*:\s*"([^"]+)"/)?.[1];
+        const parentId = prefix.match(/"parent_thread_id"\s*:\s*"([^"]+)"/)?.[1] || null;
+        if (id) result.codexMeta.set(file, { id, parentId });
+      } catch { /* 截断或损坏的元数据按普通会话处理 */ }
+    }
     else if (fields[0] === 'ALIVE' && fields.length >= 3) {
       if (!result.aliveProjects[fields[1]]) result.aliveProjects[fields[1]] = new Set();
       result.aliveProjects[fields[1]].add(fields.slice(2).join('\t'));
     }
   }
   result.files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const primary = result.files.filter(file =>
-    file.kind !== 'claude' || !remoteClaudeParentPath(file.path)).slice(0, REMOTE_MAX_FILES);
+  const allFiles = result.files;
+  const primary = allFiles.filter(file =>
+    (file.kind !== 'claude' || !remoteClaudeParentPath(file.path)) &&
+    (file.kind !== 'codex' || !result.codexMeta.get(file.path)?.parentId)).slice(0, REMOTE_MAX_FILES);
   const primaryPaths = new Set(primary.map(file => file.kind + '\0' + file.path));
-  const children = result.files.filter(file => {
-    if (file.kind !== 'claude') return false;
-    const parent = remoteClaudeParentPath(file.path);
-    return parent && primaryPaths.has('claude\0' + parent);
+  const children = allFiles.filter(file => {
+    if (file.kind === 'claude') {
+      const parent = remoteClaudeParentPath(file.path);
+      return parent && primaryPaths.has('claude\0' + parent);
+    }
+    return false;
   });
+  const selectedCodexIds = new Set(primary.filter(file => file.kind === 'codex')
+    .map(file => result.codexMeta.get(file.path)?.id).filter(Boolean));
+  let added;
+  do {
+    added = false;
+    for (const file of allFiles) {
+      if (file.kind !== 'codex' || primaryPaths.has('codex\0' + file.path)) continue;
+      const meta = result.codexMeta.get(file.path);
+      if (!meta?.parentId || !selectedCodexIds.has(meta.parentId)) continue;
+      primaryPaths.add('codex\0' + file.path);
+      children.push(file);
+      if (meta.id && !selectedCodexIds.has(meta.id)) { selectedCodexIds.add(meta.id); added = true; }
+    }
+  } while (added);
   result.files = [...primary, ...children].sort((a, b) => b.mtimeMs - a.mtimeMs);
   return result;
 }
@@ -1671,9 +1727,19 @@ function parseToolArgs(raw) {
 }
 
 function extractBashCall(name, raw) {
-  if (!['bash', 'terminal'].includes(shortToolName(name))) return null;
+  if (!['bash', 'terminal', 'exec_command'].includes(shortToolName(name))) return null;
   const args = parseToolArgs(raw);
-  return args && typeof args.command === 'string' ? { command: args.command } : null;
+  if (!args) return null;
+  const command = args.command ?? args.cmd;
+  return typeof command === 'string' ? { command } : null;
+}
+
+function extractPatchCall(name, raw) {
+  if (!['patch', 'apply_patch'].includes(shortToolName(name))) return null;
+  if (typeof raw === 'string' && raw.trim()) return { text: raw.trim() };
+  const args = parseToolArgs(raw);
+  const text = args && (args.patch ?? args.input ?? args.text);
+  return typeof text === 'string' && text.trim() ? { text: text.trim() } : null;
 }
 
 function extractWriteCall(name, raw) {
@@ -1726,8 +1792,114 @@ function toolRenderData(name, raw) {
   return {
     edit: extractEditCall(name, raw),
     bash: extractBashCall(name, raw),
+    patch: extractPatchCall(name, raw),
     write: extractWriteCall(name, raw),
     read: extractReadCall(name, raw),
+  };
+}
+
+function scanJsValue(source, start) {
+  while (/\s/.test(source[start] || '')) start++;
+  const quote = source[start];
+  if (!['"', "'", '`'].includes(quote)) return null;
+  let value = '', escaped = false;
+  for (let i = start + 1; i < source.length; i++) {
+    const char = source[i];
+    if (escaped) {
+      const escapes = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v' };
+      value += escapes[char] ?? char;
+      escaped = false;
+    } else if (char === '\\') {
+      escaped = true;
+    } else if (char === quote) {
+      return { value, end: i + 1 };
+    } else {
+      value += char;
+    }
+  }
+  return null;
+}
+
+function matchingJsParen(source, open) {
+  let depth = 0, quote = null, escaped = false, lineComment = false, blockComment = false;
+  for (let i = open; i < source.length; i++) {
+    const char = source[i], next = source[i + 1];
+    if (lineComment) { if (char === '\n') lineComment = false; continue; }
+    if (blockComment) { if (char === '*' && next === '/') { blockComment = false; i++; } continue; }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '/' && next === '/') { lineComment = true; i++; continue; }
+    if (char === '/' && next === '*') { blockComment = true; i++; continue; }
+    if (char === '"' || char === "'" || char === '`') { quote = char; continue; }
+    if (char === '(') depth++;
+    else if (char === ')' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+function resolveJsArgument(source, argument, before) {
+  const direct = scanJsValue(argument, 0);
+  if (direct && !argument.slice(direct.end).trim()) return direct.value;
+  const identifier = argument.trim().match(/^[$A-Z_a-z][$\w]*$/)?.[0];
+  if (!identifier) return argument.trim();
+  const escaped = identifier.replace(/[$]/g, '\\$&');
+  const declaration = new RegExp(`\\b(?:const|let|var)\\s+${escaped}\\s*=\\s*`, 'g');
+  let match, last = null;
+  while ((match = declaration.exec(source.slice(0, before)))) last = match;
+  if (!last) return argument.trim();
+  return scanJsValue(source, last.index + last[0].length)?.value ?? argument.trim();
+}
+
+function extractJsObjectString(argument, key) {
+  const match = new RegExp(`(?:^|[,{\\s])${key}\\s*:\\s*`).exec(argument);
+  if (!match) return null;
+  return scanJsValue(argument, match.index + match[0].length)?.value ?? null;
+}
+
+// Newer Codex releases expose one custom `exec` tool that orchestrates calls
+// such as tools.exec_command(...) and tools.apply_patch(...). Decode only the
+// static call shape; never evaluate session-provided JavaScript.
+function unwrapCodexExec(raw) {
+  if (typeof raw !== 'string') return null;
+  const calls = [];
+  const pattern = /\btools\.([$A-Z_a-z][$\w]*)\s*\(/g;
+  let match;
+  while ((match = pattern.exec(raw))) {
+    const open = pattern.lastIndex - 1;
+    const close = matchingJsParen(raw, open);
+    if (close < 0) continue;
+    const argument = raw.slice(open + 1, close).trim();
+    const name = match[1];
+    const resolved = resolveJsArgument(raw, argument, match.index);
+    const cmd = name === 'exec_command' ? extractJsObjectString(argument, 'cmd') : null;
+    calls.push({ name, argument: resolved, cmd });
+    pattern.lastIndex = close + 1;
+  }
+  if (!calls.length) return null;
+  const names = [...new Set(calls.map(call => call.name))];
+  const toolName = names.length === 1
+    ? names[0] + (calls.length > 1 ? ` ×${calls.length}` : '')
+    : names.join(' + ');
+  const commands = calls.map(call => call.cmd).filter(Boolean);
+  const single = calls.length === 1 ? calls[0] : null;
+  const renderData = single ? toolRenderData(single.name, single.argument) : {
+    edit: null,
+    bash: commands.length === calls.length
+      ? { command: commands.map((command, index) => calls.length > 1 ? `# ${index + 1}\n${command}` : command).join('\n\n') }
+      : null,
+    patch: null,
+    write: null,
+    read: null,
+  };
+  if (single?.cmd) renderData.bash = { command: single.cmd };
+  return {
+    toolName,
+    input: truncate(single ? single.argument : raw, 400),
+    ...renderData,
   };
 }
 
@@ -1906,9 +2078,11 @@ function codexCompactionDetails(line) {
 }
 
 function detailCodex(file, content) {
-  const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  const parsedLines = content == null ? parseLines(file) : parseJsonLines(content);
+  const { lines, subagent } = codexOwnSessionLines(parsedLines);
   const msgs = [];
   const readCalls = new Set();
+  const agentCalls = new Map();
   let contextTokens = null;
   let pendingCompaction = null;
   for (const l of lines) {
@@ -1947,16 +2121,44 @@ function detailCodex(file, content) {
       else if (p.type === 'agent_reasoning' && p.text) msgs.push({ role: 'thinking', text: truncate(p.text, 600), ts: l.timestamp });
       else if (p.type === 'token_count' && p.info && p.info.last_token_usage) {
         contextTokens = Number(p.info.last_token_usage.total_tokens) || contextTokens;
+      } else if (subagent && (p.type === 'task_started' || p.type === 'task_complete')) {
+        msgs.push({
+          role: 'background_task', event: p.type === 'task_complete' ? 'completed' : 'running',
+          taskId: p.turn_id || 'subagent', toolName: 'subagent',
+          output: p.last_agent_message || '', text: p.last_agent_message || '', ts: l.timestamp,
+        });
       }
     } else if (l.type === 'response_item') {
       if (p.type === 'function_call' || p.type === 'custom_tool_call') {
         const raw = p.arguments ?? p.input ?? '';
-        const input = truncate(String(raw), 400);
-        const renderData = toolRenderData(p.name, raw);
+        if (/(?:^|__)spawn_agent$/.test(String(p.name || ''))) {
+          const args = parseToolArgs(raw) || {};
+          const title = String(args.task_name || args.name || args.description || 'Subagent').replace(/^.*\//, '');
+          const event = {
+            role: 'subagent', event: 'started', agentId: args.task_name || p.call_id || null,
+            title, subagentType: args.agent_role || null, text: 'Agent 已创建', ts: l.timestamp,
+          };
+          msgs.push(event);
+          if (p.call_id) agentCalls.set(p.call_id, event);
+          continue;
+        }
+        const unwrapped = p.name === 'exec' ? unwrapCodexExec(raw) : null;
+        const input = unwrapped?.input ?? truncate(String(raw), 400);
+        const renderData = unwrapped || toolRenderData(p.name, raw);
         if (renderData.read && p.call_id) readCalls.add(p.call_id);
-        msgs.push({ role: 'tool_use', ts: l.timestamp, toolName: p.name || '?', callId: p.call_id || null,
+        msgs.push({ role: 'tool_use', ts: l.timestamp, toolName: unwrapped?.toolName || p.name || '?', callId: p.call_id || null,
           input, ...renderData, text: (p.name || '?') + ' ' + input });
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
+        const agentCall = p.call_id && agentCalls.get(p.call_id);
+        if (agentCall) {
+          const output = typeof p.output === 'string' ? parseToolArgs(p.output) : p.output;
+          const agentId = output && (output.agent_id || output.task_name || output.id);
+          if (agentId) {
+            agentCall.agentId = agentId;
+            agentCall.title = String(output.task_name || agentCall.title).replace(/^.*\//, '');
+          }
+          continue;
+        }
         const out = extractText(p.output) || extractText(p.output && p.output.content) ||
           JSON.stringify(p.output || '');
         const rawOutput = String(out);

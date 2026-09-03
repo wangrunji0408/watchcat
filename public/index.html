@@ -662,6 +662,13 @@ function renderBash(text) {
   return pre;
 }
 
+function renderPatch(text) {
+  const pre = el('pre', 'bash-block');
+  const code = el('code', 'language-diff', text || ' ');
+  pre.appendChild(code);
+  return pre;
+}
+
 function readLabel(read) {
   const parts = [read.path || 'Read'];
   if (Number.isFinite(read.startLine)) {
@@ -755,6 +762,8 @@ function renderActivity(messages, start, sessionFile) {
         ? renderEditDiff(call.use.edit)
         : call.use.write
           ? renderWriteDiff(call.use.write)
+          : call.use.patch
+            ? renderPatch(call.use.patch.text)
           : call.use.bash
             ? renderBash(call.use.bash.command)
             : call.use.read
