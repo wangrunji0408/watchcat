@@ -83,6 +83,7 @@ const MODEL_PRICES = [
   { test: /gpt[-.]5[-.]4[-.]pro(?:\b|$)/, name: 'GPT 5.4 Pro', input: 30, output: 180, long: [60, null, 270] },
   { test: /gpt[-.]5[-.]4(?:\b|$)/, name: 'GPT 5.4', input: 2.5, cached: .25, output: 15, long: [5, .5, 22.5] },
   { test: /gpt[-.]5[-.]3[-.]codex(?:\b|$)/, name: 'GPT 5.3 Codex', input: 1.75, cached: .175, output: 14 },
+  { test: /(?:fable|mythos)[-.]5[-.]1(?:\b|$)/, name: 'Claude Fable/Mythos 5.1', input: 10, cacheWrite5m: 12.5, cacheWrite1h: 20, cached: .25, output: 50 },
   { test: /(?:fable|mythos)[-.]5(?:\b|$)/, name: 'Claude Fable/Mythos 5', input: 10, cacheWrite5m: 12.5, cacheWrite1h: 20, cached: 1, output: 50 },
   { test: /opus[-.]5(?:\b|$)/, name: 'Claude Opus 5', input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cached: .5, output: 25 },
   { test: /opus[-.]4[-.]([5-8])(?:\b|$)/, name: 'Claude Opus 4.5+', input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cached: .5, output: 25 },

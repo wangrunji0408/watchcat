@@ -650,6 +650,23 @@ test('uses the published GPT-6 Astra standard and long-context prices', () => {
   assert.equal(long.cost.usd, 83.5);
 });
 
+test('uses the reduced cache-read price for Claude Fable 5.1', () => {
+  const price = priceForModel('anthropic/claude-fable-5-1');
+  assert.deepEqual(
+    [price.name, price.input, price.cached, price.cacheWrite5m, price.cacheWrite1h, price.output],
+    ['Claude Fable/Mythos 5.1', 10, .25, 12.5, 20, 50],
+  );
+  assert.equal(priceForModel('claude-fable-5').cached, 1);
+
+  const usage = normalizedUsage({
+    input_tokens: 100_000, cache_read_input_tokens: 10_000,
+    cache_creation: { ephemeral_5m_input_tokens: 20_000, ephemeral_1h_input_tokens: 10_000 },
+    output_tokens: 100_000,
+  }, 'claude');
+  const total = summarizeUsageRecords([{ model: 'claude-fable-5.1', usage }]);
+  assert.equal(total.cost.usd, 6.4525);
+});
+
 test('uses DeepSeek peak and off-peak prices after the scheduled change', () => {
   const before = priceForModel('deepseek-v4-pro', {}, new Date('2026-08-16T15:59:59Z'));
   assert.deepEqual([before.cached, before.input, before.output], [.003625, .435, .87]);
