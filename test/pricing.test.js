@@ -515,6 +515,55 @@ test('extracts Codex thinking effort from turn context', () => {
   assert.equal(summary.thinkingEffort, 'high');
 });
 
+test('reads conversations from newer Codex response items', () => {
+  const rows = [
+    { type: 'session_meta', timestamp: '2026-09-05T00:00:00Z',
+      payload: { id: 'codex-new', cwd: '/tmp/new-project' } },
+    { type: 'response_item', timestamp: '2026-09-05T00:00:01Z', payload: {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>ignored</environment_context>' }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ['environments.environment_context'] },
+    } },
+    { type: 'response_item', timestamp: '2026-09-05T00:00:02Z', payload: {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Fix the local session list' }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text'] },
+    } },
+    { type: 'response_item', timestamp: '2026-09-05T00:00:03Z', payload: {
+      type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Working on it.' }],
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeCodex('/tmp/new-session.jsonl', { size: content.length }, content);
+  const detail = detailCodex('/tmp/new-session.jsonl', content);
+
+  assert.equal(summary.id, 'codex-new');
+  assert.equal(summary.title, 'Fix the local session list');
+  assert.equal(summary.lastMessage, 'Working on it.');
+  assert.equal(summary.turns, 2);
+  assert.deepEqual(detail.map(message => [message.role, message.text]), [
+    ['user', 'Fix the local session list'],
+    ['assistant', 'Working on it.'],
+  ]);
+});
+
+test('does not duplicate legacy Codex conversation events with response items', () => {
+  const rows = [
+    { type: 'session_meta', payload: { id: 'codex-legacy', cwd: '/tmp/project' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user',
+      content: [{ type: 'input_text', text: 'duplicate user text' }] } },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'canonical user text' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant',
+      content: [{ type: 'output_text', text: 'duplicate assistant text' }] } },
+    { type: 'event_msg', payload: { type: 'agent_message', message: 'canonical assistant text' } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeCodex('/tmp/legacy-session.jsonl', { size: content.length }, content);
+  const detail = detailCodex('/tmp/legacy-session.jsonl', content);
+
+  assert.equal(summary.title, 'canonical user text');
+  assert.equal(summary.turns, 2);
+  assert.deepEqual(detail.map(message => message.text), ['canonical user text', 'canonical assistant text']);
+});
+
 test('recognizes Codex auto-review as a guardian subagent', () => {
   const rows = [
     { type: 'session_meta', timestamp: '2026-08-01T00:00:00Z', payload: {
@@ -578,6 +627,27 @@ test('uses the published GLM 5.3 token prices', () => {
   const price = priceForModel('glm-5.3');
   assert.equal(price.name, 'GLM 5.3');
   assert.deepEqual([price.input, price.cached, price.output], [1.4, .26, 4.4]);
+});
+
+test('uses the published GPT-6 Astra standard and long-context prices', () => {
+  const price = priceForModel('openai/gpt-6-astra');
+  assert.deepEqual(
+    [price.name, price.input, price.cached, price.cacheWrite5m, price.output, price.long, price.longCacheWrite5m],
+    ['GPT-6 Astra', 10, 1, 12.5, 50, [20, 2, 75], 25],
+  );
+
+  const shortUsage = normalizedUsage({
+    input_tokens: 100_000, cached_input_tokens: 10_000,
+    cache_write_tokens: 100_000, output_tokens: 100_000,
+  }, 'codex');
+  const short = summarizeUsageRecords([{ model: 'gpt-6-astra', usage: shortUsage }]);
+  assert.equal(short.cost.usd, 7.16);
+
+  const longUsage = normalizedUsage({
+    input_tokens: 300_000, cache_write_tokens: 100_000, output_tokens: 1_000_000,
+  }, 'codex');
+  const long = summarizeUsageRecords([{ model: 'gpt-6-astra', usage: longUsage }]);
+  assert.equal(long.cost.usd, 83.5);
 });
 
 test('uses DeepSeek peak and off-peak prices after the scheduled change', () => {

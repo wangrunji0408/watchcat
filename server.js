@@ -65,11 +65,12 @@ function truncateBlock(s, n) {
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
-// 更新于 2026-08-23：
+// 更新于 2026-09-05：
 // OpenAI: https://developers.openai.com/api/docs/pricing
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
 const MODEL_PRICES = [
+  { test: /gpt[-.]6[-.]astra(?:\b|$)/, name: 'GPT-6 Astra', input: 10, cached: 1, cacheWrite5m: 12.5, cacheWrite1h: 12.5, output: 50, long: [20, 2, 75], longCacheWrite5m: 25, longCacheWrite1h: 25 },
   // GPT 5.6 Sol 官方推广价（2026-08-21 起，至少持续至 2026-11-21）
   { test: /gpt[-.]5[-.]6[-.]sol(?:\b|$)/, name: 'GPT 5.6 Sol', input: 4, cached: .4, cacheWrite5m: 5, cacheWrite1h: 5, output: 20, long: [8, .8, 30], longCacheWrite5m: 10, longCacheWrite1h: 10 },
   // GPT 5.6 Terra/Luna 当前价格（2026-07-30 起）
@@ -593,6 +594,17 @@ function codexOwnSessionLines(lines) {
   return { lines: [lines[firstMetaIndex], ...lines.slice(start)], subagent: true };
 }
 
+function codexResponseMessageText(payload) {
+  if (payload?.type !== 'message' || !['user', 'assistant'].includes(payload.role)) return '';
+  if (payload.role === 'user') {
+    const kinds = payload.internal_chat_message_metadata_passthrough?.content_item_kinds;
+    // Codex Desktop also serializes injected environment context as a user
+    // response item. It is runtime metadata, not a message written by the user.
+    if (Array.isArray(kinds) && !kinds.includes('user.text')) return '';
+  }
+  return extractText(payload.content);
+}
+
 // Codex 会话摘要
 function summarizeCodex(file, stat, content) {
   const parsedLines = content == null ? parseLines(file) : parseJsonLines(content);
@@ -607,6 +619,7 @@ function summarizeCodex(file, stat, content) {
   const models = new Set();
   const usageRecords = [];
   const activityByDay = new Map();
+  const responseMessages = { user: [], assistant: [] };
 
   for (const l of lines) {
     if (l.timestamp) { if (!firstTs) firstTs = l.timestamp; lastTs = l.timestamp; }
@@ -659,6 +672,23 @@ function summarizeCodex(file, stat, content) {
         usageRecords.push({ model, usage: normalizedUsage(u, 'codex'), ts: l.timestamp || null });
       }
     }
+    if (l.type === 'response_item') {
+      const text = codexResponseMessageText(p);
+      if (text) responseMessages[p.role].push({ text, ts: l.timestamp });
+    }
+  }
+  // Recent Codex Desktop builds no longer emit user_message/agent_message
+  // event_msg rows. Prefer those legacy semantic events when present, and
+  // otherwise fall back to the corresponding response items.
+  if (!userCount) {
+    userCount = responseMessages.user.length;
+    firstUserText = responseMessages.user[0]?.text || null;
+    for (const message of responseMessages.user) bumpDate(activityByDay, message.ts);
+  }
+  if (!agentCount) {
+    agentCount = responseMessages.assistant.length;
+    lastAgentText = responseMessages.assistant.at(-1)?.text || null;
+    for (const message of responseMessages.assistant) bumpDate(activityByDay, message.ts);
   }
   if (!firstUserText && !agentCount && sessionKind !== 'subagent') return null;
   const totals = summarizeUsageRecords(usageRecords);
@@ -2080,6 +2110,8 @@ function codexCompactionDetails(line) {
 function detailCodex(file, content) {
   const parsedLines = content == null ? parseLines(file) : parseJsonLines(content);
   const { lines, subagent } = codexOwnSessionLines(parsedLines);
+  const hasConversationEvents = lines.some(line => line.type === 'event_msg' &&
+    ['user_message', 'agent_message'].includes(line.payload?.type));
   const msgs = [];
   const readCalls = new Set();
   const agentCalls = new Map();
@@ -2129,7 +2161,10 @@ function detailCodex(file, content) {
         });
       }
     } else if (l.type === 'response_item') {
-      if (p.type === 'function_call' || p.type === 'custom_tool_call') {
+      if (!hasConversationEvents && p.type === 'message') {
+        const text = codexResponseMessageText(p);
+        if (text) msgs.push({ role: p.role, text, ts: l.timestamp });
+      } else if (p.type === 'function_call' || p.type === 'custom_tool_call') {
         const raw = p.arguments ?? p.input ?? '';
         if (/(?:^|__)spawn_agent$/.test(String(p.name || ''))) {
           const args = parseToolArgs(raw) || {};
