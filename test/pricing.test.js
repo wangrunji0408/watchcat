@@ -682,6 +682,47 @@ test('uses DeepSeek peak and off-peak prices after the scheduled change', () => 
   assert.deepEqual([proOffPeak.cached, proOffPeak.input, proOffPeak.output], [.022, .66, 1.98]);
 });
 
+test('prices DeepSeek V4.1 Flash with the Flash series rates', () => {
+  const offPeak = priceForModel('deepseek-v4.1-flash-expires-on-0910', {}, new Date('2026-09-09T05:00:00Z'));
+  assert.deepEqual(
+    [offPeak.name, offPeak.cached, offPeak.input, offPeak.output],
+    ['DeepSeek V4.1 Flash', .007, .22, .66],
+  );
+
+  const peak = priceForModel('deepseek-v4.1-flash-expires-on-0910', {}, new Date('2026-09-09T02:00:00Z'));
+  assert.deepEqual([peak.cached, peak.input, peak.output], [.014, .44, 1.32]);
+
+  const usage = normalizedUsage({
+    input_tokens: 1_000_000, cached_input_tokens: 1_000_000, output_tokens: 1_000_000,
+  }, 'dsh');
+  const total = summarizeUsageRecords([{
+    model: 'deepseek-v4.1-flash-expires-on-0910', usage, ts: '2026-09-09T05:00:00Z',
+  }]);
+  assert.equal(total.cost.complete, true);
+  assert.deepEqual(total.cost.unknownModels, []);
+  assert.equal(total.cost.usd, .887);
+});
+
+test('reduces DeepSeek Flash prices from 2026-09-10 12:00 Beijing time', () => {
+  const offPeakBefore = priceForModel('deepseek-v4-flash', {}, new Date('2026-09-09T05:00:00Z'));
+  assert.deepEqual([offPeakBefore.cached, offPeakBefore.input, offPeakBefore.output], [.007, .22, .66]);
+  const offPeakAfter = priceForModel('deepseek-v4-flash', {}, new Date('2026-09-10T05:00:00Z'));
+  assert.deepEqual([offPeakAfter.cached, offPeakAfter.input, offPeakAfter.output], [.0028, .14, .56]);
+
+  const peakBefore = priceForModel('deepseek-v4.1-flash-expires-on-0910', {}, new Date('2026-09-10T02:00:00Z'));
+  assert.deepEqual([peakBefore.cached, peakBefore.input, peakBefore.output], [.014, .44, 1.32]);
+  const peakAfter = priceForModel('deepseek-v4.1-flash-expires-on-0910', {}, new Date('2026-09-11T02:00:00Z'));
+  assert.deepEqual([peakAfter.cached, peakAfter.input, peakAfter.output], [.0056, .28, 1.12]);
+
+  const pro = priceForModel('deepseek-v4-pro', {}, new Date('2026-09-11T02:00:00Z'));
+  assert.deepEqual([pro.cached, pro.input, pro.output], [.044, 1.32, 3.96]);
+});
+
+test('uses off-peak DeepSeek rates on weekends', () => {
+  const saturday = priceForModel('deepseek-v4-pro', {}, new Date('2026-09-12T02:00:00Z'));
+  assert.deepEqual([saturday.cached, saturday.input, saturday.output], [.022, .66, 1.98]);
+});
+
 test('normalizes thinking effort from runtime-specific configurations', () => {
   assert.equal(extractThinkingEffort({ thinkingLevel: 'low' }), 'low');
   assert.equal(extractThinkingEffort('{"reasoning_config":{"effort":"high"}}'), 'high');
