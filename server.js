@@ -613,16 +613,58 @@ function codexResponseMessageText(payload) {
   return extractText(payload.content);
 }
 
+const CODEX_COMPACTION_PROMPT = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:';
+
+function codexCompactionSourceItems(lines) {
+  const sources = new Set();
+  for (let i = 1; i < lines.length; i++) {
+    const compaction = codexCompactionDetails(lines[i]);
+    if (!compaction || compaction.eventType === 'context_compacted') continue;
+    let previous = null;
+    for (let j = i - 1; j >= 0; j--) {
+      const candidate = lines[j];
+      if (candidate.type === 'token_usage_record' ||
+          (candidate.type === 'event_msg' && candidate.payload?.type === 'token_count')) continue;
+      previous = candidate;
+      break;
+    }
+    if (!previous) continue;
+    if (previous.type !== 'response_item' || previous.payload?.type !== 'message' ||
+        previous.payload.role !== 'assistant' || previous.payload.phase !== 'final_answer') continue;
+    const text = codexResponseMessageText(previous.payload);
+    const normalizedText = text.trimEnd();
+    const normalizedSummary = compaction.summary.trimEnd();
+    if (!normalizedText || !normalizedSummary.endsWith(normalizedText)) continue;
+    const wrapper = normalizedSummary.slice(0, -normalizedText.length).trim();
+    if (wrapper === CODEX_COMPACTION_PROMPT) sources.add(previous);
+  }
+  return sources;
+}
+
+function codexResponseModel(responseId) {
+  if (typeof responseId !== 'string' || !/^resp_[A-Za-z0-9_-]+={0,2}$/.test(responseId)) return null;
+  try {
+    const decoded = Buffer.from(responseId.slice(5), 'base64').toString('utf8');
+    return decoded.match(/(?:^|;)model_id:([^;]+)/)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
 // Codex 会话摘要
 function summarizeCodex(file, stat, content) {
   const parsedLines = content == null ? parseLines(file) : parseJsonLines(content);
   const { lines } = codexOwnSessionLines(parsedLines);
+  const compactionSourceItems = codexCompactionSourceItems(lines);
+  const hasTokenUsageRecords = lines.some(line => line.type === 'token_usage_record');
   let cwd = null, sessionId = path.basename(file, '.jsonl'), source = null, model = null;
   let sessionKind = 'agent', parentSessionId = null, subagentType = null;
   let subagentTitle = null;
   let thinkingEffort = null;
   let firstTs = null, lastTs = null, firstUserText = null, lastAgentText = null;
   let userCount = 0, agentCount = 0, contextTokens = null;
+  let pendingUsageModel = null;
+  let pendingUsageRecord = false;
   const contextPeaks = [];
   const models = new Set();
   const usageRecords = [];
@@ -654,6 +696,10 @@ function summarizeCodex(file, stat, content) {
         p.collaboration_mode && p.collaboration_mode.settings && p.collaboration_mode.settings.reasoning_effort ||
         thinkingEffort;
     }
+    if (l.type === 'token_usage_record') {
+      pendingUsageModel = codexResponseModel(p.response_id) || pendingUsageModel;
+      pendingUsageRecord = true;
+    }
     const compaction = codexCompactionDetails(l);
     // context_compacted is the completion notification for the preceding
     // compacted record. Its token count is the post-compaction context, not a
@@ -677,10 +723,15 @@ function summarizeCodex(file, stat, content) {
       if (p.type === 'token_count' && p.info && p.info.last_token_usage) {
         const u = p.info.last_token_usage;
         contextTokens = u.total_tokens || contextTokens;
-        usageRecords.push({ model, usage: normalizedUsage(u, 'codex'), ts: l.timestamp || null });
+        if (!hasTokenUsageRecords || pendingUsageRecord) {
+          usageRecords.push({ model: pendingUsageModel || model, usage: normalizedUsage(u, 'codex'), ts: l.timestamp || null });
+        }
+        pendingUsageModel = null;
+        pendingUsageRecord = false;
       }
     }
     if (l.type === 'response_item') {
+      if (compactionSourceItems.has(l)) continue;
       const text = codexResponseMessageText(p);
       if (text) responseMessages[p.role].push({ text, ts: l.timestamp });
     }
@@ -773,7 +824,7 @@ function summarizeDsh(file, stat, content) {
         hasGoalEvent = true;
         goalObjective = goalEvent.objective || goalObjective;
       }
-      if (text && !parseDshBackgroundTask(d) && !goalEvent && !parseDshRuntimeContext(d) &&
+      if (text && !parseDshAgentMessage(d) && !parseDshBackgroundTask(d) && !goalEvent && !parseDshRuntimeContext(d) &&
           !isNoiseUserText(text) && !isDshCompactionMessage(text)) {
         userCount++;
         if (!firstUserText) firstUserText = text;
@@ -1080,6 +1131,7 @@ const remoteSummaryCache = new Map(); // host\0path -> { mtimeMs, size, cacheFil
 const remoteFileIndex = new Map(); // opaque id -> metadata entry
 const remoteProjectPathCache = new Map(); // host\0cwd -> canonical cwd
 let remoteSessionsCache = { at: 0, sessions: [], hosts: [], errors: [] };
+let remoteScanPromise = null;
 
 function remoteCacheKey(kind, host, file) {
   return kind + '\0' + host + '\0' + file;
@@ -1150,6 +1202,21 @@ function persistRemoteHistory(entry) {
   }
 }
 
+// 元数据里的 size 是写入时远端正文的长度,正文缓存文件应当与之完全一致。
+// 更长说明有两次扫描并发地把同一段后缀追加了进来,截断回已知的正确长度;
+// 更短说明上次写入未完成,返回 false,由调用方丢弃后重新拉取。
+function alignRemoteCacheFile(cacheFile, declaredSize) {
+  const actualSize = fs.statSync(cacheFile).size;
+  if (declaredSize > 0 && actualSize !== declaredSize) {
+    if (actualSize > declaredSize) {
+      fs.truncateSync(cacheFile, declaredSize);
+      return true;
+    }
+    return false;
+  }
+  return true;
+}
+
 function loadRemoteHistory() {
   for (const item of safeReadDir(REMOTE_HISTORY_DIR)) {
     if (!item.isFile() || !item.name.endsWith('.json')) continue;
@@ -1165,7 +1232,11 @@ function loadRemoteHistory() {
         if (legacyContent == null) continue;
         writeRemoteContent(entry, legacyContent, false);
       }
-      // 正文和元数据分两次原子写；若上次在两者之间退出，以正文实际大小恢复。
+      if (!alignRemoteCacheFile(entry.cacheFile, entry.size)) {
+        fs.rmSync(entry.cacheFile, { force: true });
+        if (legacyContent == null) continue;
+        writeRemoteContent(entry, legacyContent, false);
+      }
       entry.size = fs.statSync(entry.cacheFile).size;
       delete entry.content;
       entry.summary = summarizeRemoteCacheEntry(entry);
@@ -1247,6 +1318,14 @@ async function scanRemoteHost(host) {
           mtimeMs: meta.mtimeMs, size: meta.size,
         };
         cached.cacheFile = writeRemoteContent(cached, chunk, canAppend);
+        // 追加写入后正文长度必须与远端一致;否则说明缓存与远端错位,整份重写。
+        if (fs.statSync(cached.cacheFile).size !== meta.size) {
+          const full = await readRemoteFile(host, meta.path, 0, meta.size);
+          if (Buffer.byteLength(full) !== meta.size) {
+            throw new Error(`remote session changed while reading: ${meta.path}`);
+          }
+          cached.cacheFile = writeRemoteContent(cached, full, false);
+        }
         cached.summary = summarizeRemoteCacheEntry(cached);
         remoteSummaryCache.set(key, cached);
         dirty = true;
@@ -1335,6 +1414,16 @@ function cachedRemoteHostSessions(host) {
 
 async function remoteAgentSessions() {
   if (Date.now() - remoteSessionsCache.at < REMOTE_CACHE_MS) return remoteSessionsCache;
+  // /api/sessions 与 /api/stats(以及多个浏览器)会同时请求,若不加锁,两次扫描
+  // 会各自读到同一份旧缓存,然后把同一段远端增量各追加一次,导致正文、上下文和
+  // 计费统计全部翻倍。同一时刻只允许一次扫描,其余请求共享它的结果。
+  if (!remoteScanPromise) {
+    remoteScanPromise = refreshRemoteSessions().finally(() => { remoteScanPromise = null; });
+  }
+  return remoteScanPromise;
+}
+
+async function refreshRemoteSessions() {
   const activeHosts = await discoverRemoteHosts();
   const cachedHosts = new Set([...remoteSummaryCache.values()].map(entry => entry.host));
   const hosts = [...new Set([...activeHosts, ...cachedHosts])];
@@ -2118,6 +2207,7 @@ function codexCompactionDetails(line) {
 function detailCodex(file, content) {
   const parsedLines = content == null ? parseLines(file) : parseJsonLines(content);
   const { lines, subagent } = codexOwnSessionLines(parsedLines);
+  const compactionSourceItems = codexCompactionSourceItems(lines);
   const hasConversationEvents = lines.some(line => line.type === 'event_msg' &&
     ['user_message', 'agent_message'].includes(line.payload?.type));
   const msgs = [];
@@ -2169,6 +2259,7 @@ function detailCodex(file, content) {
         });
       }
     } else if (l.type === 'response_item') {
+      if (compactionSourceItems.has(l)) continue;
       if (!hasConversationEvents && p.type === 'message') {
         const text = codexResponseMessageText(p);
         if (text) msgs.push({ role: p.role, text, ts: l.timestamp });
@@ -2305,6 +2396,22 @@ function parseDshSubagentNotice(message) {
   };
 }
 
+// 子 agent 通过 inbox relay 发来的消息（source.kind === 'agent-message'）。
+function parseDshAgentMessage(message) {
+  const source = message && message.source;
+  if (!source || source.kind !== 'agent-message') return null;
+  const text = extractText(message.content)
+    .replace(/^Agent\s+\S+\s+sent a message:\s*/i, '').trim();
+  if (!text) return null;
+  return {
+    role: 'agent_message',
+    event: source.form || 'relay',
+    messageId: message.id || null,
+    agentId: source.senderSessionId || null,
+    text,
+  };
+}
+
 function parseDshTodoWrite(raw) {
   const input = parseToolArgs(raw);
   if (!input || !Array.isArray(input.todos)) return null;
@@ -2325,6 +2432,15 @@ function detailDsh(file, content) {
   const semanticCalls = new Set();
   let contextPeak = 0;
   let pendingCompaction = null;
+  const seenAgentMessages = new Set();
+  // 同一条 relay 既会出现在 agent/inbox/spliced，也会作为 user/message 投递，
+  // 用消息 id 去重，只渲染一次。
+  const pushAgentMessage = (relay, ts) => {
+    const key = relay.messageId || `${relay.agentId || ''}\0${relay.text}`;
+    if (seenAgentMessages.has(key)) return;
+    seenAgentMessages.add(key);
+    msgs.push({ ...relay, ts });
+  };
   const flushCompaction = (endTs) => {
     if (!pendingCompaction) return;
     const endMs = endTs ? Date.parse(endTs) : NaN;
@@ -2366,7 +2482,10 @@ function detailDsh(file, content) {
       const goalEvent = parseDshGoalEvent(d);
       const runtimeContext = parseDshRuntimeContext(d);
       const subagentNotice = parseDshSubagentNotice(d);
-      if (subagentNotice) {
+      const agentMessage = parseDshAgentMessage(d);
+      if (agentMessage) {
+        pushAgentMessage(agentMessage, ts);
+      } else if (subagentNotice) {
         if (!msgs.some(item => item.role === 'subagent' && item.event === 'completed' &&
             item.agentId === subagentNotice.agentId)) msgs.push({ ...subagentNotice, ts });
       } else if (runtimeContext) {
@@ -2380,6 +2499,8 @@ function detailDsh(file, content) {
       }
     } else if (l.type === 'agent/inbox/spliced') {
       for (const message of Array.isArray(d.inserted) ? d.inserted : []) {
+        const relay = parseDshAgentMessage(message);
+        if (relay) { pushAgentMessage(relay, ts); continue; }
         const notice = parseDshSubagentNotice(message);
         if (notice && notice.event === 'completed' &&
             !msgs.some(item => item.role === 'subagent' && item.event === 'completed' && item.agentId === notice.agentId)) {
@@ -2615,6 +2736,11 @@ function attachSubagentEvents(messages, parentFile, childSessions = null) {
         });
         return child ? { ...task, subagent: subagentLink(child) } : task;
       }) };
+    }
+    if (message.role === 'agent_message') {
+      const agentId = String(message.agentId || '');
+      const child = byId.get(agentId) || byId.get(agentId.replace(/^session-/, ''));
+      return child ? { ...message, subagent: subagentLink(child) } : message;
     }
     if (message.role !== 'subagent') return message;
     const child = byId.get(message.agentId) || byTitle.get(message.title) || children.find(candidate => {
@@ -2947,6 +3073,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  alignRemoteCacheFile,
   apiSessions,
   apiSessionDetail,
   apiStats,

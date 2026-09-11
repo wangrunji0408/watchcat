@@ -80,6 +80,21 @@
   .subagent-card-title { font-weight: 600; }
   .subagent-card-sub { margin-top: 2px; color: var(--dim); font-size: 12px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
+  .agent-message-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; cursor: pointer;
+    list-style: none; max-width: 900px; padding: 8px 12px; border-radius: 8px;
+    background: rgba(242,140,87,.08); border: 1px solid rgba(242,140,87,.35); }
+  .agent-message-summary::-webkit-details-marker { display: none; }
+  .agent-message-label { color: var(--openclaw); white-space: nowrap; }
+  .agent-message-label::before { content: '›'; display: inline-block; margin-right: 5px; transition: transform .15s; }
+  details[open] > .agent-message-summary .agent-message-label::before { transform: rotate(90deg); }
+  .agent-message-sender { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .agent-message-id { color: var(--dim); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+  .agent-message-time { color: var(--dim); font-size: 11px; margin-left: auto; }
+  .agent-message-link { font: inherit; font-size: 12px; color: var(--openclaw); background: none;
+    border: 0; padding: 0; cursor: pointer; }
+  .agent-message-link:hover { text-decoration: underline; }
+  .agent-message-content { max-width: 900px; margin-top: 8px; padding: 10px 12px; border-radius: 8px;
+    background: var(--panel); border: 1px solid var(--border); }
   .todo-card { display: block; width: 100%; max-width: 900px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
   .todo-row { display: flex; gap: 8px; padding: 3px 0; }
   .todo-row.completed { color: var(--dim); text-decoration: line-through; }
@@ -310,6 +325,7 @@ const MESSAGES = {
     goalResumed: 'Goal resumed', goalUpdated: 'Goal updated', goalRound: 'Goal round {round}', blockedReason: 'Blocked: {reason}', todoUpdated: 'Task list updated',
     runtimeContext: 'Runtime context', btwQuestion: '/btw · User', btwAnswer: '/btw · Assistant',
     agentFailed: 'Agent failed', agentTimeout: 'Agent timed out', agentCancelled: 'Agent cancelled', agentAborted: 'Agent aborted', agentStatus: 'Agent status',
+    agentMessage: 'Agent message',
     viewSubagent: 'View subagent log', automatic: 'automatic', manual: 'manual', beforeCompaction: '{n} tokens before compaction', compacted: 'Context compacted',
     noMessages: 'No messages to display', loadFailed: 'Failed to load: {error}', jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun',
     jul: 'Jul', aug: 'Aug', sep: 'Sep', oct: 'Oct', nov: 'Nov', dec: 'Dec', mon: 'M', wed: 'W', fri: 'F',
@@ -338,6 +354,7 @@ const MESSAGES = {
     goalResumed: '目标已恢复', goalUpdated: '目标已更新', goalRound: '目标轮次 {round}', blockedReason: '受阻原因：{reason}', todoUpdated: '任务清单已更新',
     runtimeContext: '运行环境', btwQuestion: '/btw · 用户', btwAnswer: '/btw · 助手',
     agentFailed: 'Agent 失败', agentTimeout: 'Agent 超时', agentCancelled: 'Agent 已取消', agentAborted: 'Agent 已中止', agentStatus: 'Agent 状态',
+    agentMessage: 'Agent 消息',
     viewSubagent: '点击查看 subagent 记录', automatic: '自动', manual: '手动', beforeCompaction: '压缩前 {n} tokens', compacted: '上下文已压缩',
     noMessages: '没有可显示的消息', loadFailed: '加载失败：{error}', jan: '1月', feb: '2月', mar: '3月', apr: '4月', may: '5月', jun: '6月',
     jul: '7月', aug: '8月', sep: '9月', oct: '10月', nov: '11月', dec: '12月', mon: '一', wed: '三', fri: '五',
@@ -1530,6 +1547,29 @@ async function openSession(s, keepScroll) {
         card.appendChild(el('div', 'subagent-card-sub', details.join(' · ') || m.text || ''));
         if (m.subagent) card.onclick = () => openSubagent(m.subagent);
         box.appendChild(card);
+        main.appendChild(box);
+        i++;
+        continue;
+      }
+      if (m.role === 'agent_message') {
+        const linkedTitle = m.subagent && m.subagent.title;
+        const box = expandable('details', 'msg agent-message', s.file + ':agent-message:' + i);
+        const summary = el('summary', 'agent-message-summary');
+        summary.appendChild(el('span', 'agent-message-label', t('agentMessage')));
+        summary.appendChild(el('span', 'agent-message-sender', linkedTitle || m.agentId || 'Agent'));
+        if (linkedTitle && m.agentId) summary.appendChild(el('span', 'agent-message-id', m.agentId));
+        if (m.subagent) {
+          const link = el('button', 'agent-message-link', t('viewSubagent'));
+          link.type = 'button';
+          // 按钮在 <summary> 内，点击时不要顺带展开/收起消息正文。
+          link.onclick = (event) => { event.preventDefault(); event.stopPropagation(); openSubagent(m.subagent); };
+          summary.appendChild(link);
+        }
+        if (m.ts) summary.appendChild(el('span', 'agent-message-time', fmtTime(m.ts)));
+        box.appendChild(summary);
+        const content = el('div', 'agent-message-content');
+        content.appendChild(renderMarkdown(m.text, 'markdown-body'));
+        box.appendChild(content);
         main.appendChild(box);
         i++;
         continue;

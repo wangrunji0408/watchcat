@@ -5,6 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 const {
+  alignRemoteCacheFile,
   attachSubagentEvents,
   decorateOpenClawSummary,
   decorateHermesSummary,
@@ -354,6 +355,38 @@ test('does not duplicate a linked DeepSeek Harness subagent start event', () => 
   assert.equal(events[0].subagent.file, child.file);
 });
 
+test('renders DeepSeek Harness agent messages once and links the sender session', () => {
+  const relay = {
+    id: 'relay-1', role: 'user',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'child-id' },
+    content: [
+      { type: 'text', text: 'Agent child-id sent a message:' },
+      { type: 'text', text: 'net module done' },
+    ],
+  };
+  const rows = [
+    { type: 'session', id: 'parent', cwd: '/tmp/project' },
+    { type: 'user/message', time: 1785515762000, data: { content: [{ type: 'text', text: 'delegate' }], source: { kind: 'user' } } },
+    { type: 'agent/inbox/spliced', time: 1785515763000, data: { target: 'next-step', start: 0, inserted: [relay] } },
+    { type: 'user/message', time: 1785515763500, data: relay },
+    { type: 'assistant/message', time: 1785515764000, data: { message: { content: [{ type: 'text', text: 'ok' }] } } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeDsh('/tmp/parent/session.jsonl.zstd', { size: content.length }, content);
+  const detail = detailDsh('/tmp/parent/session.jsonl.zstd', content);
+
+  assert.equal(summary.turns, 2);
+  assert.deepEqual(detail.map(message => message.role), ['user', 'agent_message', 'assistant']);
+  assert.equal(detail[1].agentId, 'child-id');
+  assert.equal(detail[1].messageId, 'relay-1');
+  assert.equal(detail[1].text, 'net module done');
+
+  const child = { source: 'dsh', id: 'child-id', file: '/tmp/child/session.jsonl.zstd',
+    project: '/tmp', title: 'Net module', sessionKind: 'subagent' };
+  const linked = attachSubagentEvents(detail, '/tmp/parent/session.jsonl.zstd', [child]);
+  assert.equal(linked[1].subagent.file, child.file);
+});
+
 test('renders DeepSeek Harness compaction summaries and context peaks', () => {
   const rows = [
     { type: 'session', id: 'session-compact', createdAt: 1785515761000, cwd: '/tmp/project' },
@@ -564,6 +597,40 @@ test('does not duplicate legacy Codex conversation events with response items', 
   assert.deepEqual(detail.map(message => message.text), ['canonical user text', 'canonical assistant text']);
 });
 
+test('does not render generated Codex compaction summaries as assistant messages', () => {
+  const prompt = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:';
+  const rows = [
+    { type: 'session_meta', payload: { id: 'codex-new-compaction', cwd: '/tmp/project' } },
+    { type: 'response_item', timestamp: '2026-09-06T04:00:00Z', payload: {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue the work' }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text'] },
+    } },
+    { type: 'response_item', timestamp: '2026-09-06T04:01:00Z', payload: {
+      type: 'message', role: 'assistant', phase: 'final_answer',
+      content: [{ type: 'output_text', text: '## Checkpoint\n\nWork completed so far.\n' }],
+    } },
+    { type: 'token_usage_record', timestamp: '2026-09-06T04:01:00Z', payload: {} },
+    { type: 'event_msg', timestamp: '2026-09-06T04:01:00Z', payload: {
+      type: 'token_count', info: { last_token_usage: { total_tokens: 1000 } },
+    } },
+    { type: 'compacted', timestamp: '2026-09-06T04:01:00Z', payload: {
+      message: prompt + '\n## Checkpoint\n\nWork completed so far.\n',
+    } },
+    { type: 'response_item', timestamp: '2026-09-06T04:02:00Z', payload: {
+      type: 'message', role: 'assistant', phase: 'commentary',
+      content: [{ type: 'output_text', text: 'Continuing after compaction.' }],
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeCodex('/tmp/session.jsonl', { size: content.length }, content);
+  const detail = detailCodex('/tmp/session.jsonl', content);
+
+  assert.equal(summary.turns, 2);
+  assert.equal(summary.lastMessage, 'Continuing after compaction.');
+  assert.deepEqual(detail.map(message => message.role), ['user', 'compaction', 'assistant']);
+  assert.equal(detail[1].summary, prompt + '\n## Checkpoint\n\nWork completed so far.');
+});
+
 test('recognizes Codex auto-review as a guardian subagent', () => {
   const rows = [
     { type: 'session_meta', timestamp: '2026-08-01T00:00:00Z', payload: {
@@ -585,6 +652,35 @@ test('recognizes Codex auto-review as a guardian subagent', () => {
   assert.equal(review.subagentType, 'guardian');
   assert.equal(review.parentSessionId, 'parent-1');
   assert.equal(review.parentFile, '/tmp/parent.jsonl');
+});
+
+test('prices Codex auto-review usage using its recorded underlying model', () => {
+  const responseId = 'resp_' + Buffer.from(
+    'litellm:custom_llm_provider:openai;model_id:azure-gpt-5.4-mini;response_id:example',
+  ).toString('base64');
+  const rows = [
+    { type: 'session_meta', payload: { id: 'review-1', parent_thread_id: 'parent-1', cwd: '/tmp/project' } },
+    { type: 'turn_context', payload: { model: 'codex-auto-review', effort: 'low' } },
+    { type: 'event_msg', timestamp: '2026-09-06T00:00:00Z', payload: {
+      type: 'token_count', info: { last_token_usage: {
+        input_tokens: 900, cached_input_tokens: 0, output_tokens: 100, total_tokens: 1000,
+      } },
+    } },
+    { type: 'token_usage_record', payload: { response_id: responseId } },
+    { type: 'event_msg', timestamp: '2026-09-06T00:00:00Z', payload: {
+      type: 'token_count', info: { last_token_usage: {
+        input_tokens: 1000, cached_input_tokens: 100, output_tokens: 100, total_tokens: 1100,
+      } },
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const summary = summarizeCodex('/tmp/review.jsonl', { size: content.length }, content);
+
+  assert.equal(summary.model, 'codex-auto-review');
+  assert.equal(summary.cost.complete, true);
+  assert.deepEqual(summary.cost.unknownModels, []);
+  assert.ok(summary.cost.usd > 0);
+  assert.equal(summary.usage.requests, 1);
 });
 
 test('summarizes newer Codex thread_spawn subagents without plaintext messages', () => {
@@ -1370,4 +1466,28 @@ test('renders Codex spawn_agent as a linked subagent event candidate', () => {
   assert.deepEqual(detail.map(message => message.role), ['subagent']);
   assert.equal(detail[0].agentId, '/root/test_x64');
   assert.equal(detail[0].title, 'test_x64');
+});
+
+test('truncates remote history caches that were appended more than once', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watchcat-remote-'));
+  const file = path.join(dir, 'session.jsonl');
+  const prefix = '{"ordinal":0}\n{"ordinal":1}\n';
+  const grown = prefix + '{"ordinal":2}\n';
+  // 两次并发扫描各自把同一段后缀追加了一次
+  fs.writeFileSync(file, grown + '{"ordinal":2}\n');
+
+  assert.equal(alignRemoteCacheFile(file, Buffer.byteLength(grown)), true);
+  assert.equal(fs.readFileSync(file, 'utf8'), grown);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('reports incomplete remote history caches so they can be refetched', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watchcat-remote-'));
+  const file = path.join(dir, 'session.jsonl');
+  const content = '{"ordinal":0}\n';
+  fs.writeFileSync(file, content);
+
+  assert.equal(alignRemoteCacheFile(file, Buffer.byteLength(content) + 10), false);
+  assert.equal(fs.readFileSync(file, 'utf8'), content);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
