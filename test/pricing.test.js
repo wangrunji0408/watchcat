@@ -449,6 +449,47 @@ test('renders DeepSeek Harness background task completions as task events', () =
   assert.equal(detail[1].role, 'user');
 });
 
+test('renders DeepSeek Harness background job completions as task events', () => {
+  const multiLine = ['background job bash-22 (bash: cd /tmp/project &&',
+    'npm run build) finished [status: completed, exit code: 0]. Read its output with job_output.'].join('\n');
+  const rows = [
+    { type: 'user/message', time: 1785515762000, data: {
+      content: [{ type: 'text', text:
+        'background job bash-20 (bash: npm test) finished [status: completed, exit code: 0]. Read its output with job_output.' }],
+      source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice',
+        summary: 'bash npm test [status: completed, exit code: 0]' }, role: 'user',
+    } },
+    { type: 'user/message', time: 1785515763000, data: {
+      content: [{ type: 'text', text:
+        'background job bash-21 (bash: echo "(a") finished [status: failed, exit code: 2]. Read its output with job_output.' }],
+      source: { kind: 'plugin', plugin: 'tool-jobs' }, role: 'user',
+    } },
+    { type: 'user/message', time: 1785515764000, data: {
+      content: [{ type: 'text', text: multiLine }],
+      source: { kind: 'plugin', plugin: 'tool-jobs' }, role: 'user',
+    } },
+    { type: 'user/message', time: 1785515765000, data: {
+      content: [{ type: 'text', text:
+        'background job bash-23\n[notice truncated]\nDone; job_output.' }],
+      source: { kind: 'plugin', plugin: 'tool-jobs' }, role: 'user',
+    } },
+  ];
+
+  const detail = detailDsh('/tmp/session.jsonl.zstd', rows.map(JSON.stringify).join('\n'));
+
+  assert.deepEqual(detail.map(message => message.role), Array(4).fill('background_task'));
+  assert.deepEqual(detail.map(message => message.event), ['completed', 'failed', 'completed', 'completed']);
+  assert.deepEqual(detail.map(message => message.taskId), ['bash-20', 'bash-21', 'bash-22', 'bash-23']);
+  assert.equal(detail[0].toolName, 'bash');
+  assert.equal(detail[0].command, 'npm test');
+  assert.equal(detail[0].exitCode, 0);
+  assert.equal(detail[1].exitCode, 2);
+  assert.equal(detail[2].command, 'cd /tmp/project &&\nnpm run build');
+  assert.equal(detail[2].exitCode, 0);
+  assert.equal(detail[3].command, null);
+  assert.equal(detail[3].text, 'background job bash-23\n[notice truncated]\nDone; job_output.');
+});
+
 test('renders DeepSeek Harness goal updates as events and excludes them from user turns', () => {
   const goal = {
     id: 'goal-example', revision: 2, objective: 'Ship the example', phase: 'blocked', maxGoalRounds: 8,

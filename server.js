@@ -2323,18 +2323,32 @@ function isDshCompactionMessage(text) {
       /automatically generated checkpoint condensing an earlier span/i.test(text));
 }
 
+// DSH 的后台任务通知由插件发出：旧版为 tool-tasks 的 "background task"，
+// 现为 tool-jobs 的 "background job"。两者正文格式一致：
+//   background job <id> (<kind>: <label>) finished [status: <status>, exit code: <n>].
+// 超长通知会被截断，此时退化为只保留 id 和状态。
+const DSH_BACKGROUND_TASK_PLUGINS = new Set(['tool-tasks', 'tool-jobs']);
+
 function parseDshBackgroundTask(message) {
-  if (!message || message.source?.kind !== 'plugin' || message.source.plugin !== 'tool-tasks') return null;
+  const source = message && message.source;
+  if (!source || source.kind !== 'plugin' || !DSH_BACKGROUND_TASK_PLUGINS.has(source.plugin)) return null;
   const text = extractText(message.content);
-  const match = text.match(/^background task (\S+) \(([^:\s()]+): ([\s\S]*)\) finished \[status: ([^,\]]+)(?:, exit code: (-?\d+))?\]\./i);
-  if (!match) return null;
+  const head = text.match(/^background (?:task|job) (\S+)/i);
+  if (!head) return null;
+  const rest = text.slice(head[0].length);
+  const body = rest.match(/^ \(([^:\s()]+): ([\s\S]*)\)\s+finished \[status:\s*([^,\]]+)(?:,\s*([^\]]*))?\]/i);
+  const status = body ? body[3].trim().toLowerCase()
+    : ((text.match(/\[status:\s*([^,\]]+)/i) || [])[1] || '').trim().toLowerCase();
+  const detail = body && body[4] ? body[4].trim() : null;
+  const exitMatch = (detail || text).match(/exit code:?\s*(-?\d+)/i);
   return {
     role: 'background_task',
-    event: match[4].trim().toLowerCase(),
-    taskId: match[1],
-    toolName: match[2],
-    command: match[3],
-    exitCode: match[5] == null ? null : Number(match[5]),
+    event: status || 'completed',
+    taskId: head[1],
+    toolName: body ? body[1] : null,
+    command: body ? body[2].trim() : null,
+    detail,
+    exitCode: exitMatch ? Number(exitMatch[1]) : null,
     text,
   };
 }
