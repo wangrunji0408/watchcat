@@ -65,7 +65,7 @@ function truncateBlock(s, n) {
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
-// 更新于 2026-09-09：
+// 更新于 2026-09-14：
 // OpenAI: https://developers.openai.com/api/docs/pricing
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
@@ -94,6 +94,7 @@ const MODEL_PRICES = [
   { test: /haiku[-.]4[-.]5(?:\b|$)/, name: 'Claude Haiku 4.5', input: 1, cacheWrite5m: 1.25, cacheWrite1h: 2, cached: .1, output: 5 },
   { test: /(?:haiku[-.]3[-.]5|3[-.]5[-.]haiku)(?:\b|$)/, name: 'Claude Haiku 3.5', input: .8, cacheWrite5m: 1, cacheWrite1h: 1.6, cached: .08, output: 4 },
   // DeepSeek: https://api-docs.deepseek.com/quick_start/pricing/
+  { test: /^deepseek[-.]flash(?:\b|$)/, name: 'DeepSeek V4.1 Flash', input: .15, cached: .003, output: .6 },
   { test: /deepseek[-.]v4[-.]pro(?:\b|$)/, name: 'DeepSeek V4 Pro', input: .435, cached: .003625, output: .87 },
   { test: /deepseek[-.]v4[-.]flash(?:\b|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
   { test: /deepseek[-.](?:chat|reasoner)(?:\b|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
@@ -132,17 +133,19 @@ function priceForModel(model, usage = {}, now = new Date()) {
   const normalized = normalizeModelName(model);
   // DeepSeek 自 2026-08-16 16:00 UTC 起实行峰谷价。峰时段为周一至周五
   // 01:00–04:00、06:00–10:00 UTC，其余时间按半价计费。
-  if (/deepseek[-.](?:v4(?:[.-]1)?[-.](?:flash|pro)|chat|reasoner)(?:\b|$)/.test(normalized) &&
+  if (/deepseek[-.](?:flash|v4(?:[.-]1)?[-.](?:flash|pro)|chat|reasoner)(?:\b|$)/.test(normalized) &&
       now >= new Date('2026-08-16T16:00:00Z')) {
-    const v41 = /v4[.-]1(?:\b|$)/.test(normalized);
+    // V4.1 Flash 自 2026-09-10 发布，官方模型名为 deepseek-flash；
+    // deepseek-v4-flash、deepseek-v4-flash-vision-exp 等旧名仍按 Flash 价计费。
+    const v41 = /^deepseek[-.]flash(?:\b|$)/.test(normalized) || /v4[.-]1(?:\b|$)/.test(normalized);
     const pro = /v4(?:[.-]1)?[.-]pro(?:\b|$)/.test(normalized);
     const hour = now.getUTCHours();
     const weekday = now.getUTCDay() >= 1 && now.getUTCDay() <= 5;
     const peak = weekday && ((hour >= 1 && hour < 4) || (hour >= 6 && hour < 10));
-    // Flash 系列自 2026-09-10 12:00（北京时间）起下调空闲时段价格，
-    // 高峰时段仍为空闲时段的两倍。V4.1 Flash 内测期沿用 Flash 系列价格。
+    // Flash 系列自 2026-09-10 12:00（北京时间）V4.1 Flash 发布起下调价格，
+    // 高峰时段仍为空闲时段的两倍。
     const flash = now >= new Date('2026-09-10T04:00:00Z')
-      ? (peak ? [.0056, .28, 1.12] : [.0028, .14, .56])
+      ? (peak ? [.006, .3, 1.2] : [.003, .15, .6])
       : (peak ? [.014, .44, 1.32] : [.007, .22, .66]);
     const rates = pro
       ? (peak ? [.044, 1.32, 3.96] : [.022, .66, 1.98])
