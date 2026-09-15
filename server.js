@@ -65,9 +65,10 @@ function truncateBlock(s, n) {
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
-// 更新于 2026-09-14：
+// 更新于 2026-09-15：
 // OpenAI: https://developers.openai.com/api/docs/pricing
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+// Google: https://ai.google.dev/gemini-api/docs/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
 const MODEL_PRICES = [
   { test: /gpt[-.]6[-.]astra(?:\b|$)/, name: 'GPT-6 Astra', input: 10, cached: 1, cacheWrite5m: 12.5, cacheWrite1h: 12.5, output: 50, long: [20, 2, 75], longCacheWrite5m: 25, longCacheWrite1h: 25 },
@@ -179,6 +180,14 @@ function priceForModel(model, usage = {}, now = new Date()) {
     return reduced
       ? { name: 'GPT 5.6 Luna', input: .2, cached: .02, cacheWrite5m: .25, cacheWrite1h: .25, output: 1.2, long: [.4, .04, 1.8], longCacheWrite5m: .5, longCacheWrite1h: .5 }
       : { name: 'GPT 5.6 Luna', input: 1, cached: .1, output: 6, long: [2, .2, 9] };
+  }
+  // Gemini: https://ai.google.dev/gemini-api/docs/pricing
+  // Gemini 3.6 Flash 是限时价，官方价 2027-01-01 起翻倍。
+  if (/gemini[-.]3[-.]6[-.]flash(?:\b|$)/.test(normalized)) {
+    const discounted = now < new Date('2027-01-01T00:00:00Z');
+    return discounted
+      ? { name: 'Gemini 3.6 Flash', input: .75, cached: .075, output: 3.75 }
+      : { name: 'Gemini 3.6 Flash', input: 1.5, cached: .15, output: 7.5 };
   }
   let price = MODEL_PRICES.find(p => p.test.test(normalized));
   if (!price) return null;

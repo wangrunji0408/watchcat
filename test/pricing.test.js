@@ -766,6 +766,28 @@ test('uses the published GLM 5.3 token prices', () => {
   assert.deepEqual([price.input, price.cached, price.output], [1.4, .26, 4.4]);
 });
 
+test('uses the published Gemini 3.6 Flash prices', () => {
+  const price = priceForModel('gemini-3.6-flash');
+  assert.deepEqual(
+    [price.name, price.input, price.cached, price.output],
+    ['Gemini 3.6 Flash', .75, .075, 3.75],
+  );
+
+  const usage = normalizedUsage({
+    input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, output_tokens: 1_000_000,
+  }, 'openclaw');
+  const total = summarizeUsageRecords([{
+    model: 'gemini-3.6-flash', usage, ts: '2026-09-15T04:00:00Z',
+  }]);
+  assert.equal(total.cost.complete, true);
+  assert.deepEqual(total.cost.unknownModels, []);
+  assert.equal(total.cost.usd, 4.575);
+
+  // 限时价截至 2026-12-31，2027-01-01 起官方价格翻倍。
+  const raised = priceForModel('gemini-3.6-flash', {}, new Date('2027-01-01T00:00:00Z'));
+  assert.deepEqual([raised.input, raised.cached, raised.output], [1.5, .15, 7.5]);
+});
+
 test('uses the published GPT-6 Astra standard and long-context prices', () => {
   const price = priceForModel('openai/gpt-6-astra');
   assert.deepEqual(
