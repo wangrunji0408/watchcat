@@ -625,6 +625,28 @@ function codexResponseMessageText(payload) {
   return extractText(payload.content);
 }
 
+function codexReasoningText(payload) {
+  const parts = [];
+  const append = value => {
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if (text) parts.push(text);
+    } else if (value && typeof value === 'object' && typeof value.text === 'string') {
+      append(value.text);
+    }
+  };
+  const appendList = value => {
+    if (Array.isArray(value)) value.forEach(append);
+    else append(value);
+  };
+
+  appendList(payload && payload.summary);
+  appendList(payload && payload.summary_text);
+  appendList(payload && payload.content);
+  appendList(payload && payload.raw_content);
+  return parts.join('\n\n');
+}
+
 const CODEX_COMPACTION_PROMPT = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:';
 
 function codexCompactionSourceItems(lines) {
@@ -2225,6 +2247,13 @@ function detailCodex(file, content) {
   const msgs = [];
   const readCalls = new Set();
   const agentCalls = new Map();
+  const reasoningTexts = new Set();
+  const pushReasoning = (text, ts) => {
+    const value = String(text || '').trim();
+    if (!value || reasoningTexts.has(value)) return;
+    reasoningTexts.add(value);
+    msgs.push({ role: 'thinking', text: truncate(value, 600), ts });
+  };
   let contextTokens = null;
   let pendingCompaction = null;
   for (const l of lines) {
@@ -2260,7 +2289,10 @@ function detailCodex(file, content) {
         pendingCompaction = null;
         msgs.push({ role: 'assistant', text: p.message, ts: l.timestamp });
       }
-      else if (p.type === 'agent_reasoning' && p.text) msgs.push({ role: 'thinking', text: truncate(p.text, 600), ts: l.timestamp });
+      else if (p.type === 'agent_reasoning' && p.text) pushReasoning(p.text, l.timestamp);
+      else if (p.type === 'item_completed' && p.item && p.item.type === 'Reasoning') {
+        pushReasoning(codexReasoningText(p.item), l.timestamp);
+      }
       else if (p.type === 'token_count' && p.info && p.info.last_token_usage) {
         contextTokens = Number(p.info.last_token_usage.total_tokens) || contextTokens;
       } else if (subagent && (p.type === 'task_started' || p.type === 'task_complete')) {
@@ -2275,6 +2307,8 @@ function detailCodex(file, content) {
       if (!hasConversationEvents && p.type === 'message') {
         const text = codexResponseMessageText(p);
         if (text) msgs.push({ role: p.role, text, ts: l.timestamp });
+      } else if (p.type === 'reasoning') {
+        pushReasoning(codexReasoningText(p), l.timestamp);
       } else if (p.type === 'function_call' || p.type === 'custom_tool_call') {
         const raw = p.arguments ?? p.input ?? '';
         if (/(?:^|__)spawn_agent$/.test(String(p.name || ''))) {

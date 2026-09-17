@@ -638,6 +638,66 @@ test('does not duplicate legacy Codex conversation events with response items', 
   assert.deepEqual(detail.map(message => message.text), ['canonical user text', 'canonical assistant text']);
 });
 
+test('renders newer Codex reasoning response items as thinking messages', () => {
+  const rows = [
+    { type: 'session_meta', payload: { id: 'codex-reasoning', cwd: '/tmp/project' } },
+    { type: 'response_item', timestamp: '2026-09-17T00:00:01Z', payload: {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Analyze the parser.' }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text'] },
+    } },
+    { type: 'response_item', timestamp: '2026-09-17T00:00:02Z', payload: {
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: '**Checking the parser**\n\nInspect the response items.' }],
+      encrypted_content: 'encrypted-summary',
+    } },
+    { type: 'response_item', timestamp: '2026-09-17T00:00:03Z', payload: {
+      type: 'reasoning',
+      summary: [],
+      content: [{ type: 'reasoning_text', text: 'The parser needs a reasoning branch.' }],
+      encrypted_content: 'encrypted-content',
+    } },
+    { type: 'response_item', timestamp: '2026-09-17T00:00:04Z', payload: {
+      type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixed.' }],
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const detail = detailCodex('/tmp/reasoning-session.jsonl', content);
+
+  assert.deepEqual(detail.map(message => message.role), ['user', 'thinking', 'thinking', 'assistant']);
+  assert.equal(detail[1].text, '**Checking the parser** Inspect the response items.');
+  assert.equal(detail[2].text, 'The parser needs a reasoning branch.');
+});
+
+test('does not duplicate Codex reasoning emitted in legacy and response formats', () => {
+  const rows = [
+    { type: 'session_meta', payload: { id: 'codex-reasoning-dedup', cwd: '/tmp/project' } },
+    { type: 'event_msg', timestamp: '2026-09-17T00:00:01Z', payload: {
+      type: 'agent_reasoning', text: 'Consider both session formats.',
+    } },
+    { type: 'response_item', timestamp: '2026-09-17T00:00:01Z', payload: {
+      type: 'reasoning', summary: [], content: [{
+        type: 'reasoning_text', text: 'Consider both session formats.',
+      }],
+    } },
+    { type: 'event_msg', timestamp: '2026-09-17T00:00:02Z', payload: {
+      type: 'item_completed',
+      item: { type: 'Reasoning', summary_text: [], raw_content: ['Keep the parser compatible.'] },
+    } },
+    { type: 'response_item', timestamp: '2026-09-17T00:00:02Z', payload: {
+      type: 'reasoning', summary: [], content: [{
+        type: 'reasoning_text', text: 'Keep the parser compatible.',
+      }],
+    } },
+  ];
+  const content = rows.map(JSON.stringify).join('\n');
+  const detail = detailCodex('/tmp/reasoning-dedup-session.jsonl', content);
+
+  assert.deepEqual(detail.map(message => message.text), [
+    'Consider both session formats.',
+    'Keep the parser compatible.',
+  ]);
+});
+
 test('does not render generated Codex compaction summaries as assistant messages', () => {
   const prompt = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:';
   const rows = [
