@@ -1642,3 +1642,48 @@ test('reports incomplete remote history caches so they can be refetched', () => 
   assert.equal(fs.readFileSync(file, 'utf8'), content);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('uses Codex saved titles and picks up renames without mutating cached summaries', () => {
+  const { parseCodexTitles, applyCodexTitle } = require('../server');
+  const index = [
+    { id: 'example', thread_name: 'Initial title' },
+    { id: 'example', thread_name: 'Renamed in Codex' },
+    { id: 'example', thread_name: '  ' },
+  ].map(JSON.stringify).join('\n') + '\ninvalid json';
+  const summary = { id: 'example', title: 'First user message' };
+  assert.equal(applyCodexTitle(summary, parseCodexTitles(index)).title, 'Renamed in Codex');
+  assert.equal(applyCodexTitle(summary, parseCodexTitles(index, [
+    { id: 'example', title: 'Database title' },
+  ])).title, 'Database title');
+  assert.equal(summary.title, 'First user message');
+  assert.equal(applyCodexTitle(summary, new Map()), summary);
+});
+
+test('reads Codex title changes independently of rollout files', () => {
+  const { readCodexTitles } = require('../server');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watchcat-titles-'));
+  try {
+    const index = path.join(dir, 'session_index.jsonl');
+    fs.writeFileSync(index, JSON.stringify({ id: 'example', thread_name: 'Index title' }));
+    assert.equal(readCodexTitles(dir).get('example'), 'Index title');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(path.join(dir, 'state_5.sqlite'));
+    try {
+      db.exec('CREATE TABLE threads (id TEXT, title TEXT)');
+      db.prepare('INSERT INTO threads VALUES (?, ?)').run('example', 'Database title');
+      assert.equal(readCodexTitles(dir).get('example'), 'Database title');
+      db.prepare('UPDATE threads SET title = ?').run('Renamed title');
+      assert.equal(readCodexTitles(dir).get('example'), 'Renamed title');
+    } finally { db.close(); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('reads remote Codex title metadata separately from session logs', () => {
+  const { parseRemoteScan } = require('../server');
+  const encode = value => Buffer.from(value).toString('base64');
+  const scan = parseRemoteScan([
+    'CODEX_TITLES\t' + encode(JSON.stringify({ id: 'remote-example', thread_name: 'Index title' })),
+    'CODEX_DB_TITLES\t' + encode(JSON.stringify([{ id: 'remote-example', title: '远端标题\n第二行' }])),
+  ].join('\n'));
+  assert.equal(scan.codexTitles.get('remote-example'), '远端标题\n第二行');
+});

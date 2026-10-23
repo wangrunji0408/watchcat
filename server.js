@@ -7,12 +7,15 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const zlib = require('zlib');
+const { pipeline } = require('stream/promises');
 const { execFile, execFileSync } = require('child_process');
 
 const PORT = parseInt(process.env.PORT || '3789', 10);
 const HOME = os.homedir();
 const CLAUDE_DIR = path.join(HOME, '.claude', 'projects');
-const CODEX_DIR = path.join(HOME, '.codex', 'sessions');
+const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(HOME, '.codex'));
+const CODEX_DIR = path.join(CODEX_HOME, 'sessions');
 const DSH_DIR = path.join(HOME, '.dsh', 'sessions');
 const CETUS_DIR = path.join(HOME, 'Library', 'Application Support', 'dev.cetus.app', 'sessions');
 const OPENCLAW_DIR = path.resolve(process.env.OPENCLAW_STATE_DIR || path.join(HOME, '.openclaw'));
@@ -65,12 +68,14 @@ function truncateBlock(s, n) {
 // ---------- 模型价格与成本估算 ----------
 
 // 单价均为 USD / 1M tokens，按 Standard API 价格估算。
-// 更新于 2026-09-15：
+// 更新于 2026-10-24：
 // OpenAI: https://developers.openai.com/api/docs/pricing
 // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 // Google: https://ai.google.dev/gemini-api/docs/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
 const MODEL_PRICES = [
+  { test: /gpt[-.]6[-.]1[-.]sol(?:\b|$)/, name: 'GPT-6.1 Sol', input: 2, cached: .1, cacheWrite5m: 2.5, cacheWrite1h: 2.5, output: 10 },
+  { test: /gpt[-.]6[-.]luna(?:\b|$)/, name: 'GPT-6 Luna', input: .1, cached: .01, cacheWrite5m: .125, cacheWrite1h: .125, output: .5 },
   { test: /gpt[-.]6[-.]astra(?:\b|$)/, name: 'GPT-6 Astra', input: 10, cached: 1, cacheWrite5m: 12.5, cacheWrite1h: 12.5, output: 50, long: [20, 2, 75], longCacheWrite5m: 25, longCacheWrite1h: 25 },
   // GPT 5.6 Sol 官方推广价（2026-08-21 起，至少持续至 2026-11-21）
   { test: /gpt[-.]5[-.]6[-.]sol(?:\b|$)/, name: 'GPT 5.6 Sol', input: 4, cached: .4, cacheWrite5m: 5, cacheWrite1h: 5, output: 20, long: [8, .8, 30], longCacheWrite5m: 10, longCacheWrite1h: 10 },
@@ -86,10 +91,13 @@ const MODEL_PRICES = [
   { test: /gpt[-.]5[-.]3[-.]codex(?:\b|$)/, name: 'GPT 5.3 Codex', input: 1.75, cached: .175, output: 14 },
   { test: /(?:fable|mythos)[-.]5[-.]1(?:\b|$)/, name: 'Claude Fable/Mythos 5.1', input: 10, cacheWrite5m: 12.5, cacheWrite1h: 20, cached: .25, output: 50 },
   { test: /(?:fable|mythos)[-.]5(?:\b|$)/, name: 'Claude Fable/Mythos 5', input: 10, cacheWrite5m: 12.5, cacheWrite1h: 20, cached: 1, output: 50 },
+  { test: /opus[-.]5[-.]5(?:\b|$)/, name: 'Claude Opus 5.5', input: 4, cacheWrite5m: 5, cacheWrite1h: 8, cached: .2, output: 20 },
   { test: /opus[-.]5(?:\b|$)/, name: 'Claude Opus 5', input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cached: .5, output: 25 },
   { test: /opus[-.]4[-.]([5-8])(?:\b|$)/, name: 'Claude Opus 4.5+', input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cached: .5, output: 25 },
   { test: /opus[-.]4[-.]1(?:\b|$)/, name: 'Claude Opus 4.1', input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cached: 1.5, output: 75 },
   { test: /opus[-.]4(?:\b|$)/, name: 'Claude Opus 4', input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cached: 1.5, output: 75 },
+  { test: /sonnet[-.]5[-.]5(?:\b|$)/, name: 'Claude Sonnet 5.5', input: 2, cacheWrite5m: 2.5, cacheWrite1h: 4, cached: .1, output: 10 },
+  { test: /haiku[-.]5[-.]5(?:\b|$)/, name: 'Claude Haiku 5.5', input: .1, cacheWrite5m: .125, cacheWrite1h: .2, cached: .01, output: .5 },
   { test: /sonnet[-.]4[-.](?:5|6)(?:\b|$)/, name: 'Claude Sonnet 4.5+', input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cached: .3, output: 15 },
   { test: /sonnet[-.]4(?:\b|$)/, name: 'Claude Sonnet 4', input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cached: .3, output: 15 },
   { test: /haiku[-.]4[-.]5(?:\b|$)/, name: 'Claude Haiku 4.5', input: 1, cacheWrite5m: 1.25, cacheWrite1h: 2, cached: .1, output: 5 },
@@ -154,12 +162,9 @@ function priceForModel(model, usage = {}, now = new Date()) {
     return { name: `DeepSeek V4${v41 ? '.1' : ''} ${pro ? 'Pro' : 'Flash'}`,
       cached: rates[0], input: rates[1], output: rates[2] };
   }
-  // Sonnet 5 的官方推广价截至 2026-08-31，之后自动切换标准价。
+  // Sonnet 5 的推广价已结束；当前标准价为 $2/$10 每百万输入/输出 tokens。
   if (/sonnet[-.]5(?:\b|$)/.test(normalized)) {
-    const promotional = now < new Date('2026-09-01T00:00:00Z');
-    return promotional
-      ? { name: 'Claude Sonnet 5', input: 2, cacheWrite5m: 2.5, cacheWrite1h: 4, cached: .2, output: 10 }
-      : { name: 'Claude Sonnet 5', input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cached: .3, output: 15 };
+    return { name: 'Claude Sonnet 5', input: 2, cacheWrite5m: 2.5, cacheWrite1h: 4, cached: .2, output: 10 };
   }
   // GPT 5.6 Sol 官方推广价自 2026-08-21 起生效，此前的会话按原价计费。
   if (/gpt[-.]5[-.]6[-.]sol(?:\b|$)/.test(normalized)) {
@@ -194,7 +199,9 @@ function priceForModel(model, usage = {}, now = new Date()) {
   price = { ...price };
 
   // Claude Opus fast mode 和 US-only inference 使用官方对应倍率。
-  if (usage.speed === 'fast' && /opus[-.](?:4[-.]8|5)(?:\b|$)/.test(normalized)) {
+  if (usage.speed === 'fast' && /opus[-.]5[-.]5(?:\b|$)/.test(normalized)) {
+    Object.assign(price, { input: 8, output: 40, cacheWrite5m: 10, cacheWrite1h: 16, cached: .4 });
+  } else if (usage.speed === 'fast' && /opus[-.](?:4[-.]8|5)(?:\b|$)/.test(normalized)) {
     Object.assign(price, { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cached: 1 });
   } else if (usage.speed === 'fast' && /opus[-.]4[-.]7(?:\b|$)/.test(normalized)) {
     Object.assign(price, { input: 30, output: 150, cacheWrite5m: 37.5, cacheWrite1h: 60, cached: 3 });
@@ -685,6 +692,45 @@ function codexResponseModel(responseId) {
   }
 }
 
+// Titles live outside the rollout logs and can change without a log update.
+function parseCodexTitles(indexContent, databaseRows = []) {
+  const titles = new Map();
+  for (const row of parseJsonLines(indexContent)) {
+    if (typeof row.id === 'string' && typeof row.thread_name === 'string' && row.thread_name.trim()) {
+      titles.set(row.id, row.thread_name.trim());
+    }
+  }
+  for (const row of databaseRows) {
+    if (typeof row.id === 'string' && typeof row.title === 'string' && row.title.trim()) {
+      titles.set(row.id, row.title.trim());
+    }
+  }
+  return titles;
+}
+
+function readCodexTitles(codexHome = CODEX_HOME) {
+  let indexContent = '';
+  try { indexContent = fs.readFileSync(path.join(codexHome, 'session_index.jsonl'), 'utf8'); } catch {}
+  const databases = safeReadDir(codexHome)
+    .filter(item => item.isFile() && /^state_\d+\.sqlite$/.test(item.name))
+    .sort((a, b) => Number(b.name.match(/\d+/)[0]) - Number(a.name.match(/\d+/)[0]));
+  for (const database of databases) {
+    let db;
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      db = new DatabaseSync(path.join(codexHome, database.name), { readOnly: true });
+      return parseCodexTitles(indexContent, db.prepare('SELECT id, title FROM threads').all());
+    } catch { /* Older runtimes or unavailable databases still have the title index. */ }
+    finally { if (db) db.close(); }
+  }
+  return parseCodexTitles(indexContent);
+}
+
+function applyCodexTitle(summary, titles) {
+  const title = summary && titles.get(summary.id);
+  return title ? { ...summary, title } : summary;
+}
+
 // Codex 会话摘要
 function summarizeCodex(file, stat, content) {
   const parsedLines = content == null ? parseLines(file) : parseJsonLines(content);
@@ -1059,7 +1105,45 @@ async function discoverRemoteHosts() {
 
 const REMOTE_SCAN_SCRIPT = `
 codex_root="\${CODEX_HOME:-$HOME/.codex}/sessions"
+if [ -z "$CODEX_HOME" ] && [ -d /proc ] && command -v pgrep >/dev/null 2>&1; then
+  for pid in $(pgrep -x codex 2>/dev/null); do
+    active_home=$(tr '\\000' '\\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^CODEX_HOME=//p')
+    if [ -n "$active_home" ] && [ -d "$active_home/sessions" ]; then
+      codex_root="$active_home/sessions"
+      break
+    fi
+  done
+fi
 claude_root="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+if [ -f "\${codex_root%/sessions}/session_index.jsonl" ]; then
+  printf 'CODEX_TITLES\\t'
+  base64 < "\${codex_root%/sessions}/session_index.jsonl" | tr -d '\\n'
+  printf '\\n'
+fi
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$codex_root/.." <<'PYCODEX'
+import base64, json, pathlib, sqlite3, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+databases = sorted(root.glob('state_*.sqlite'), key=lambda p: int(p.stem.split('_')[-1]) if p.stem.split('_')[-1].isdigit() else -1, reverse=True)
+for database in databases:
+    try:
+        db = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)
+        try:
+            rows = [dict(id=id, title=title) for id, title in db.execute('SELECT id, title FROM threads')]
+        finally:
+            db.close()
+        print('CODEX_DB_TITLES' + chr(9) + base64.b64encode(json.dumps(rows).encode()).decode())
+        break
+    except sqlite3.Error:
+        continue
+PYCODEX
+elif command -v sqlite3 >/dev/null 2>&1; then
+  ls -t "\${codex_root%/sessions}"/state_*.sqlite 2>/dev/null | while IFS= read -r db; do
+    titles=$(sqlite3 -readonly -json "$db" 'SELECT id, title FROM threads' 2>/dev/null) || continue
+    printf 'CODEX_DB_TITLES\\t%s\\n' "$(printf '%s' "$titles" | base64 | tr -d '\\n')"
+    break
+  done
+fi
 printf 'ROOT\\tcodex\\t%s\\n' "$codex_root"
 printf 'ROOT\\tclaude\\t%s\\n' "$claude_root"
 if [ -d "$codex_root" ]; then
@@ -1104,10 +1188,15 @@ function remoteClaudeParentPath(file) {
 }
 
 function parseRemoteScan(stdout) {
-  const result = { roots: {}, files: [], openFiles: new Set(), aliveProjects: {}, codexMeta: new Map() };
+  const result = { roots: {}, files: [], openFiles: new Set(), aliveProjects: {}, codexMeta: new Map(), codexTitles: new Map() };
+  let titleIndex = '', titleRows = [];
   for (const line of stdout.split('\n')) {
     const fields = line.split('\t');
-    if (fields[0] === 'ROOT' && fields.length >= 3) result.roots[fields[1]] = fields.slice(2).join('\t');
+    if (fields[0] === 'CODEX_TITLES') {
+      titleIndex = Buffer.from(fields[1] || '', 'base64').toString('utf8');
+    } else if (fields[0] === 'CODEX_DB_TITLES') {
+      try { titleRows = JSON.parse(Buffer.from(fields[1] || '', 'base64').toString('utf8')); } catch {}
+    } else if (fields[0] === 'ROOT' && fields.length >= 3) result.roots[fields[1]] = fields.slice(2).join('\t');
     else if (fields[0] === 'FILE' && fields.length >= 5) {
       result.files.push({ kind: fields[1], mtimeMs: Number(fields[2]) * 1000, size: Number(fields[3]), path: fields.slice(4).join('\t') });
     } else if (fields[0] === 'OPEN') result.openFiles.add(fields.slice(1).join('\t'));
@@ -1125,8 +1214,10 @@ function parseRemoteScan(stdout) {
       result.aliveProjects[fields[1]].add(fields.slice(2).join('\t'));
     }
   }
+  result.codexTitles = parseCodexTitles(titleIndex, Array.isArray(titleRows) ? titleRows : []);
   result.files.sort((a, b) => b.mtimeMs - a.mtimeMs);
   const allFiles = result.files;
+  result.fileMetadata = new Map(allFiles.map(meta => [meta.kind + '\0' + meta.path, meta]));
   const primary = allFiles.filter(file =>
     (file.kind !== 'claude' || !remoteClaudeParentPath(file.path)) &&
     (file.kind !== 'codex' || !result.codexMeta.get(file.path)?.parentId)).slice(0, REMOTE_MAX_FILES);
@@ -1160,7 +1251,7 @@ function remoteFileId(kind, host, file) {
   return 'remote-' + kind + ':' + Buffer.from(host + '\0' + file).toString('base64url');
 }
 
-// 与本地会话一样，远端正文只保存在磁盘上的 jsonl 中；内存仅缓存元数据和摘要。
+// Remote bodies stay on disk as JSONL or gzip; memory caches only metadata and summaries.
 const remoteSummaryCache = new Map(); // host\0path -> { mtimeMs, size, cacheFile, summary }
 const remoteFileIndex = new Map(); // opaque id -> metadata entry
 const remoteProjectPathCache = new Map(); // host\0cwd -> canonical cwd
@@ -1175,7 +1266,7 @@ function summarizeRemoteCacheEntry(entry) {
   const id = remoteFileId(entry.kind, entry.host, entry.path);
   let summary;
   try {
-    const content = fs.readFileSync(entry.cacheFile, 'utf8');
+    const content = readRemoteContent(entry.cacheFile);
     const stat = { mtimeMs: entry.mtimeMs, size: entry.size };
     summary = entry.kind === 'claude'
       ? summarizeClaude(entry.path, stat, content)
@@ -1206,9 +1297,8 @@ function ensureRemoteHistoryDir() {
   fs.mkdirSync(REMOTE_HISTORY_DIR, { recursive: true, mode: 0o700 });
 }
 
-function writeRemoteContent(entry, content, append) {
-  ensureRemoteHistoryDir();
-  const file = remoteContentFile(entry);
+function writeRemoteContent(entry, content, append, file = remoteContentFile(entry)) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   if (append) {
     fs.appendFileSync(file, content, { mode: 0o600 });
   } else {
@@ -1216,7 +1306,53 @@ function writeRemoteContent(entry, content, append) {
     fs.writeFileSync(temp, content, { mode: 0o600 });
     fs.renameSync(temp, file);
   }
+  fs.rmSync(file + '.gz', { force: true });
   return file;
+}
+
+function readRemoteContent(file) {
+  const bytes = fs.readFileSync(file);
+  return (file.endsWith('.gz') ? zlib.gunzipSync(bytes) : bytes).toString('utf8');
+}
+
+function restoreRemoteContent(entry) {
+  if (!entry.cacheFile.endsWith('.gz')) return;
+  const content = readRemoteContent(entry.cacheFile);
+  if (Buffer.byteLength(content) !== entry.size) throw new Error('remote cache size mismatch');
+  entry.cacheFile = writeRemoteContent(entry, content, false, entry.cacheFile.slice(0, -3));
+}
+
+async function compressRemoteContent(entry) {
+  if (entry.cacheFile.endsWith('.gz')) return false;
+  const original = entry.cacheFile;
+  const target = original + '.gz';
+  const temp = target + '.' + process.pid + '.tmp';
+  try {
+    const source = fs.createReadStream(original);
+    const originalHash = crypto.createHash('sha256');
+    source.on('data', chunk => originalHash.update(chunk));
+    await pipeline(source, zlib.createGzip(),
+      fs.createWriteStream(temp, { mode: 0o600 }));
+    const restoredHash = crypto.createHash('sha256');
+    await pipeline(fs.createReadStream(temp), zlib.createGunzip(), restoredHash);
+    if (originalHash.digest('hex') !== restoredHash.digest('hex')) {
+      throw new Error('remote cache compression verification failed');
+    }
+    // Publish the complete gzip before removing the original. Readers see either
+    // the original file or a complete gzip; an interrupted migration keeps both.
+    fs.renameSync(temp, target);
+    entry.cacheFile = target;
+    fs.unlinkSync(original);
+    return true;
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
+}
+
+function shouldCompressRemoteContent(entry, meta, openFiles, now = Date.now()) {
+  return !!meta && entry.size === meta.size && entry.mtimeMs === meta.mtimeMs &&
+    meta.mtimeMs > 0 && now - meta.mtimeMs >= 24 * 60 * 60 * 1000 &&
+    !openFiles.has(meta.path);
 }
 
 function persistRemoteHistory(entry) {
@@ -1228,6 +1364,7 @@ function persistRemoteHistory(entry) {
       version: 2,
       kind: entry.kind, host: entry.host, path: entry.path, root: entry.root,
       mtimeMs: entry.mtimeMs, size: entry.size, canonicalProject: entry.canonicalProject,
+      codexTitle: entry.codexTitle,
     };
     fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
     fs.renameSync(temp, file);
@@ -1240,10 +1377,16 @@ function persistRemoteHistory(entry) {
 // 更长说明有两次扫描并发地把同一段后缀追加了进来,截断回已知的正确长度;
 // 更短说明上次写入未完成,返回 false,由调用方丢弃后重新拉取。
 function alignRemoteCacheFile(cacheFile, declaredSize) {
-  const actualSize = fs.statSync(cacheFile).size;
+  const compressed = cacheFile.endsWith('.gz');
+  const content = compressed ? zlib.gunzipSync(fs.readFileSync(cacheFile)) : null;
+  const actualSize = compressed ? content.length : fs.statSync(cacheFile).size;
   if (declaredSize > 0 && actualSize !== declaredSize) {
     if (actualSize > declaredSize) {
-      fs.truncateSync(cacheFile, declaredSize);
+      if (compressed) {
+        const temp = cacheFile + '.' + process.pid + '.tmp';
+        fs.writeFileSync(temp, zlib.gzipSync(content.subarray(0, declaredSize)), { mode: 0o600 });
+        fs.renameSync(temp, cacheFile);
+      } else fs.truncateSync(cacheFile, declaredSize);
       return true;
     }
     return false;
@@ -1262,18 +1405,22 @@ function loadRemoteHistory() {
       entry.size = Number(entry.size) || (legacyContent == null ? 0 : Buffer.byteLength(legacyContent));
       entry.mtimeMs = Number(entry.mtimeMs) || 0;
       entry.cacheFile = remoteContentFile(entry);
+      if (!fs.existsSync(entry.cacheFile) && fs.existsSync(entry.cacheFile + '.gz')) entry.cacheFile += '.gz';
       if (!fs.existsSync(entry.cacheFile)) {
         if (legacyContent == null) continue;
-        writeRemoteContent(entry, legacyContent, false);
+        entry.cacheFile = writeRemoteContent(entry, legacyContent, false);
       }
       if (!alignRemoteCacheFile(entry.cacheFile, entry.size)) {
         fs.rmSync(entry.cacheFile, { force: true });
         if (legacyContent == null) continue;
-        writeRemoteContent(entry, legacyContent, false);
+        entry.cacheFile = writeRemoteContent(entry, legacyContent, false);
       }
-      entry.size = fs.statSync(entry.cacheFile).size;
+      if (!entry.cacheFile.endsWith('.gz')) entry.size = fs.statSync(entry.cacheFile).size;
       delete entry.content;
       entry.summary = summarizeRemoteCacheEntry(entry);
+      if (entry.kind === 'codex' && entry.codexTitle && entry.summary) {
+        entry.summary = { ...entry.summary, title: entry.codexTitle };
+      }
       remoteSummaryCache.set(remoteCacheKey(entry.kind, entry.host, entry.path), entry);
       if (entry.canonicalProject && entry.summary?.project) {
         remoteProjectPathCache.set(entry.host + '\0' + entry.summary.project, entry.canonicalProject);
@@ -1338,6 +1485,9 @@ async function scanRemoteHost(host) {
     try {
       let cached = previous;
       let dirty = false;
+      if (cached && (cached.mtimeMs !== meta.mtimeMs || cached.size !== meta.size || scan.openFiles.has(meta.path))) {
+        restoreRemoteContent(cached);
+      }
       if (!cached || cached.mtimeMs !== meta.mtimeMs || cached.size !== meta.size) {
         let cachedFileSize = -1;
         try { cachedFileSize = fs.statSync(cached.cacheFile).size; } catch {}
@@ -1380,6 +1530,20 @@ async function scanRemoteHost(host) {
     });
   }
 
+  await mapLimit(entries, 2, async ({ cached, error }) => {
+    if (!cached || error) return;
+    const meta = scan.fileMetadata.get(cached.kind + '\0' + cached.path);
+    try {
+      if (meta && (meta.mtimeMs !== cached.mtimeMs || meta.size !== cached.size || scan.openFiles.has(meta.path))) {
+        restoreRemoteContent(cached);
+      } else if (shouldCompressRemoteContent(cached, meta, scan.openFiles)) {
+        await compressRemoteContent(cached);
+      }
+    } catch (error) {
+      console.error('远端缓存压缩/恢复失败:', error.message);
+    }
+  });
+
   // Codex 和 Claude 可能分别记录软链接路径与真实路径；统一 cwd，避免同一项目被拆组。
   const projectPaths = await resolveRemoteProjectPaths(host, [
     ...entries.map(entry => entry.cached?.summary?.project),
@@ -1387,10 +1551,16 @@ async function scanRemoteHost(host) {
   ]);
   for (const entry of entries) {
     if (!entry.cached?.summary) continue;
+    const title = entry.cached.kind === 'codex' && scan.codexTitles.get(entry.cached.summary.id);
+    const titleChanged = title && title !== entry.cached.codexTitle;
+    if (title) {
+      entry.cached.codexTitle = title;
+      entry.cached.summary = { ...entry.cached.summary, title };
+    }
     const canonicalProject = projectPaths.get(entry.cached.summary.project) || entry.cached.summary.project;
     const canonicalChanged = entry.cached.canonicalProject !== canonicalProject;
     entry.cached.canonicalProject = canonicalProject;
-    if (entry.dirty || canonicalChanged) persistRemoteHistory(entry.cached);
+    if (entry.dirty || canonicalChanged || titleChanged) persistRemoteHistory(entry.cached);
   }
 
   // Claude 会在每次写入后关闭日志文件；用存活进程的 cwd 关联该项目最新会话。
@@ -1409,7 +1579,7 @@ async function scanRemoteHost(host) {
   for (const { meta, cached, historical } of entries) {
     if (!cached) continue; // 单个历史日志读取失败不影响同一主机上的其他会话
     if (!cached.summary) continue;
-    const s = { ...cached.summary };
+    const s = { ...(meta.kind === 'codex' ? applyCodexTitle(cached.summary, scan.codexTitles) : cached.summary) };
     s.remoteHost = host;
     s.remotePath = meta.path;
     const canonicalProject = cached.canonicalProject || projectPaths.get(s.project) || s.project;
@@ -2875,6 +3045,7 @@ function linkDshSubagents(sessions) {
 async function collectSessions() {
   const claudeFiles = listClaudeSessionFiles();
   const codexFiles = listFilesRecursive(CODEX_DIR, '.jsonl');
+  const codexTitles = readCodexTitles();
   const dshFiles = listFilesRecursive(DSH_DIR, '.jsonl.zstd');
   const cetusFiles = listFilesRecursive(CETUS_DIR, '.jsonl');
   const openClawEntries = listOpenClawSessionEntries();
@@ -2887,7 +3058,7 @@ async function collectSessions() {
     if (s) sessions.push(decorateClaudeSubagentSummary(s));
   }
   for (const f of codexFiles) {
-    const s = getSummary(f, 'codex');
+    const s = applyCodexTitle(getSummary(f, 'codex'), codexTitles);
     if (s) sessions.push(s);
   }
   for (const f of dshFiles) {
@@ -3051,8 +3222,8 @@ function apiSessionDetail(query) {
     if (!remote) throw httpError(404, 'remote session not found; refresh sessions first');
     if (!fs.existsSync(remote.cacheFile)) throw httpError(404, 'remote session cache not found');
     let messages = remote.kind === 'claude'
-      ? detailClaude(remote.path, fs.readFileSync(remote.cacheFile, 'utf8'))
-      : detailCodex(remote.cacheFile);
+      ? detailClaude(remote.path, readRemoteContent(remote.cacheFile))
+      : detailCodex(remote.path, readRemoteContent(remote.cacheFile));
     messages = attachSubagentEvents(messages, file);
     return { file, source: remote.kind, remoteHost: remote.host, messages };
   }
@@ -3133,7 +3304,16 @@ if (require.main === module) {
 }
 
 module.exports = {
+  REMOTE_SCAN_SCRIPT,
   alignRemoteCacheFile,
+  compressRemoteContent,
+  readRemoteContent,
+  restoreRemoteContent,
+  shouldCompressRemoteContent,
+  summarizeRemoteCacheEntry,
+  applyCodexTitle,
+  parseCodexTitles,
+  readCodexTitles,
   apiSessions,
   apiSessionDetail,
   apiStats,
