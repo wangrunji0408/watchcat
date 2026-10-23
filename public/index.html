@@ -321,7 +321,7 @@ const MESSAGES = {
     runningCount: '{n} running', sessions: '{n} sessions', projectsSummary: '{projects} projects · {sessions} sessions', sshErrors: 'SSH errors', noSessions: 'No session logs found',
     model: 'Model {name}', thinkingEffort: 'Thinking effort {value}', user: 'User', assistant: 'Assistant', agentStarted: 'Agent started', agentCompleted: 'Agent completed',
     backgroundTaskCompleted: 'Background task completed', backgroundTaskStatus: 'Background task: {status}', exitCode: 'exit {code}',
-    goalCreated: 'Goal created', goalCompleted: 'Goal completed', goalBlocked: 'Goal blocked', goalPaused: 'Goal paused',
+    goalCreated: 'Goal created', goalCompleted: 'Goal completed', goalBlocked: 'Goal blocked', goalPaused: 'Goal paused', goalCleared: 'Goal cleared',
     goalResumed: 'Goal resumed', goalUpdated: 'Goal updated', goalRound: 'Goal round {round}', blockedReason: 'Blocked: {reason}', todoUpdated: 'Task list updated',
     runtimeContext: 'Runtime context', btwQuestion: '/btw · User', btwAnswer: '/btw · Assistant',
     agentFailed: 'Agent failed', agentTimeout: 'Agent timed out', agentCancelled: 'Agent cancelled', agentAborted: 'Agent aborted', agentStatus: 'Agent status',
@@ -350,7 +350,7 @@ const MESSAGES = {
     runningCount: '{n} 运行', sessions: '{n} 会话', projectsSummary: '{projects} 项目 · {sessions} 会话', sshErrors: 'SSH 异常', noSessions: '没有找到任何会话日志',
     model: '模型 {name}', thinkingEffort: '思考强度 {value}', user: '用户', assistant: '助手', agentStarted: 'Agent 已创建', agentCompleted: 'Agent 完成',
     backgroundTaskCompleted: '后台任务已完成', backgroundTaskStatus: '后台任务：{status}', exitCode: '退出码 {code}',
-    goalCreated: '目标已创建', goalCompleted: '目标已完成', goalBlocked: '目标受阻', goalPaused: '目标已暂停',
+    goalCreated: '目标已创建', goalCompleted: '目标已完成', goalBlocked: '目标受阻', goalPaused: '目标已暂停', goalCleared: '目标已清除',
     goalResumed: '目标已恢复', goalUpdated: '目标已更新', goalRound: '目标轮次 {round}', blockedReason: '受阻原因：{reason}', todoUpdated: '任务清单已更新',
     runtimeContext: '运行环境', btwQuestion: '/btw · 用户', btwAnswer: '/btw · 助手',
     agentFailed: 'Agent 失败', agentTimeout: 'Agent 超时', agentCancelled: 'Agent 已取消', agentAborted: 'Agent 已中止', agentStatus: 'Agent 状态',
@@ -1579,6 +1579,7 @@ async function openSession(s, keepScroll) {
         firstGoalShown = true;
         const eventNames = {
           create: t('goalCreated'), complete: t('goalCompleted'), block: t('goalBlocked'),
+          clear: t('goalCleared'),
           pause: t('goalPaused'), resume: t('goalResumed'), edit: t('goalUpdated'), updated: t('goalUpdated'),
         };
         const round = m.round == null ? '' : String(m.round) + (m.maxRounds == null ? '' : '/' + m.maxRounds);

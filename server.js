@@ -54,6 +54,25 @@ function listFilesRecursive(dir, ext, out = []) {
   return out;
 }
 
+// Migrations retain older generations beside the current log. Show each
+// session once, including uncompressed logs used by newer DSH installations.
+function listDshSessionFiles(dir = DSH_DIR) {
+  const selected = new Map();
+  for (const file of listFilesRecursive(dir, '')) {
+    const match = /^session(?:\.v([1-9]\d*))?\.jsonl(\.zstd)?$/.exec(path.basename(file));
+    if (!match) continue;
+    const version = Number(match[1] || 0);
+    if (!Number.isSafeInteger(version)) continue;
+    const key = path.dirname(file);
+    const previous = selected.get(key);
+    if (!previous || version > previous.version ||
+        (version === previous.version && !match[2])) {
+      selected.set(key, { file, version });
+    }
+  }
+  return [...selected.values()].map(entry => entry.file);
+}
+
 function truncate(s, n) {
   if (typeof s !== 'string') return '';
   s = s.replace(/\s+/g, ' ').trim();
@@ -887,6 +906,11 @@ function summarizeDsh(file, stat, content) {
     } else if (l.type === 'subagent/descriptor') {
       sessionKind = 'subagent';
       subagentType = d.label || d.mode || 'dsh';
+    } else if (l.type === 'subagent/catalog' && d.childId) {
+      spawnedAgentIds.add(d.childId);
+    } else if (l.type === 'goal/change') {
+      hasGoalEvent = true;
+      goalObjective = d.goal?.objective || goalObjective;
     } else if (l.type === 'session/title' && d.title) {
       title = d.title;
     } else if (l.type === 'request/header') {
@@ -2525,6 +2549,8 @@ function detailCodex(file, content) {
 function dshToolResultText(message) {
   const parts = [];
   for (const outer of message && Array.isArray(message.content) ? message.content : []) {
+    // v4 tool messages carry result blocks directly; v0-v3 wrap them.
+    if (outer.type === 'text' && outer.text) parts.push(outer.text);
     if (outer.type !== 'tool-result') continue;
     for (const inner of Array.isArray(outer.content) ? outer.content : []) {
       if (inner.type === 'text' && inner.text) parts.push(inner.text);
@@ -2570,10 +2596,19 @@ function parseDshBackgroundTask(message) {
 }
 
 function parseDshGoalEvent(message) {
+  if (message?.kind === 'goal/change') {
+    const event = parseDshGoalEvent({ source: { kind: 'goal', change: message }, content: [] });
+    if (event) event.round = message.roundsStarted ?? null;
+    return event;
+  }
   if (!message || message.source?.kind !== 'goal') return null;
   const source = message.source;
   const text = extractText(message.content);
   const change = source.change;
+  if (change?.operation === 'clear') {
+    return { role: 'goal', event: 'clear', goalId: change.cleared?.id || null,
+      objective: null, phase: null, round: null, maxRounds: null, reason: null, text };
+  }
   if (change && change.goal) {
     const goal = change.goal;
     const reason = goal.blockedReason;
@@ -2706,6 +2741,12 @@ function detailDsh(file, content) {
       pendingCompaction.model = d.model || null;
     } else if (l.type === 'compact/end') {
       flushCompaction(ts);
+    } else if (l.type === 'goal/change') {
+      const goalEvent = parseDshGoalEvent(d);
+      if (goalEvent) msgs.push({ ...goalEvent, ts });
+    } else if (l.type === 'system/message' && d.message) {
+      const text = extractText(d.message.content);
+      if (text) msgs.push({ role: 'runtime_context', text, ts });
     } else if (l.type === 'user/message') {
       const value = extractText(d.content);
       const backgroundTask = parseDshBackgroundTask(d);
@@ -2772,7 +2813,7 @@ function detailDsh(file, content) {
         input, ...renderData, text: (d.name || '?') + ' ' + input });
     } else if (l.type === 'tool/result') {
       const rawOutput = dshToolResultText(d.message);
-      const callId = d.callId || d.message && d.message.source && d.message.source.callId || null;
+      const callId = d.callId || d.message?.toolCallId || d.message?.source?.callId || null;
       if (callId && semanticCalls.has(callId)) continue;
       if (callId && completedCalls.has(callId)) continue;
       if (callId) completedCalls.add(callId);
@@ -3046,7 +3087,7 @@ async function collectSessions() {
   const claudeFiles = listClaudeSessionFiles();
   const codexFiles = listFilesRecursive(CODEX_DIR, '.jsonl');
   const codexTitles = readCodexTitles();
-  const dshFiles = listFilesRecursive(DSH_DIR, '.jsonl.zstd');
+  const dshFiles = listDshSessionFiles();
   const cetusFiles = listFilesRecursive(CETUS_DIR, '.jsonl');
   const openClawEntries = listOpenClawSessionEntries();
   const openFiles = await getOpenJsonlFiles();
@@ -3332,6 +3373,7 @@ module.exports = {
   includeSubagentCosts,
   linkCodexSubagents,
   linkDshSubagents,
+  listDshSessionFiles,
   parseRemoteScan,
   priceForModel,
   remoteAgentSessions,
