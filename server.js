@@ -93,6 +93,8 @@ function truncateBlock(s, n) {
 // Google: https://ai.google.dev/gemini-api/docs/pricing
 // Kimi: https://platform.kimi.com/docs/pricing
 const MODEL_PRICES = [
+  { test: /^codex-auto-review$/, name: 'Codex auto-review', input: .15, cached: .003, output: .6 },
+  { test: /gpt[-.]6[-.]1[-.]terra(?:\b|$)/, name: 'GPT-6.1 Terra', input: 1, cached: .05, cacheWrite5m: 1.25, cacheWrite1h: 1.25, output: 5, long: [2, .1, 7.5], longCacheWrite5m: 2.5, longCacheWrite1h: 2.5 },
   { test: /gpt[-.]6[-.]1[-.]sol(?:\b|$)/, name: 'GPT-6.1 Sol', input: 2, cached: .1, cacheWrite5m: 2.5, cacheWrite1h: 2.5, output: 10 },
   { test: /gpt[-.]6[-.]luna(?:\b|$)/, name: 'GPT-6 Luna', input: .1, cached: .01, cacheWrite5m: .125, cacheWrite1h: .125, output: .5 },
   { test: /gpt[-.]6[-.]astra(?:\b|$)/, name: 'GPT-6 Astra', input: 10, cached: 1, cacheWrite5m: 12.5, cacheWrite1h: 12.5, output: 50, long: [20, 2, 75], longCacheWrite5m: 25, longCacheWrite1h: 25 },
@@ -720,8 +722,9 @@ function parseCodexTitles(indexContent, databaseRows = []) {
     }
   }
   for (const row of databaseRows) {
-    if (typeof row.id === 'string' && typeof row.title === 'string' && row.title.trim()) {
-      titles.set(row.id, row.title.trim());
+    const title = typeof row.name === 'string' && row.name.trim() ? row.name : row.title;
+    if (typeof row.id === 'string' && typeof title === 'string' && title.trim()) {
+      titles.set(row.id, title.trim());
     }
   }
   return titles;
@@ -738,7 +741,10 @@ function readCodexTitles(codexHome = CODEX_HOME) {
     try {
       const { DatabaseSync } = require('node:sqlite');
       db = new DatabaseSync(path.join(codexHome, database.name), { readOnly: true });
-      return parseCodexTitles(indexContent, db.prepare('SELECT id, title FROM threads').all());
+      const columns = db.prepare('PRAGMA table_info(threads)').all();
+      const query = columns.some(column => column.name === 'name')
+        ? 'SELECT id, title, name FROM threads' : 'SELECT id, title FROM threads';
+      return parseCodexTitles(indexContent, db.prepare(query).all());
     } catch { /* Older runtimes or unavailable databases still have the title index. */ }
     finally { if (db) db.close(); }
   }
@@ -823,7 +829,7 @@ function summarizeCodex(file, stat, content) {
         const u = p.info.last_token_usage;
         contextTokens = u.total_tokens || contextTokens;
         if (!hasTokenUsageRecords || pendingUsageRecord) {
-          usageRecords.push({ model: pendingUsageModel || model, usage: normalizedUsage(u, 'codex'), ts: l.timestamp || null });
+          usageRecords.push({ model: model === 'codex-auto-review' ? model : pendingUsageModel || model, usage: normalizedUsage(u, 'codex'), ts: l.timestamp || null });
         }
         pendingUsageModel = null;
         pendingUsageRecord = false;
@@ -1153,7 +1159,9 @@ for database in databases:
     try:
         db = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)
         try:
-            rows = [dict(id=id, title=title) for id, title in db.execute('SELECT id, title FROM threads')]
+            columns = {row[1] for row in db.execute('PRAGMA table_info(threads)')}
+            query = 'SELECT id, title, name FROM threads' if 'name' in columns else 'SELECT id, title, NULL FROM threads'
+            rows = [dict(id=id, title=title, name=name) for id, title, name in db.execute(query)]
         finally:
             db.close()
         print('CODEX_DB_TITLES' + chr(9) + base64.b64encode(json.dumps(rows).encode()).decode())
@@ -1163,7 +1171,7 @@ for database in databases:
 PYCODEX
 elif command -v sqlite3 >/dev/null 2>&1; then
   ls -t "\${codex_root%/sessions}"/state_*.sqlite 2>/dev/null | while IFS= read -r db; do
-    titles=$(sqlite3 -readonly -json "$db" 'SELECT id, title FROM threads' 2>/dev/null) || continue
+    titles=$(sqlite3 -readonly -json "$db" 'SELECT id, title, name FROM threads' 2>/dev/null) || titles=$(sqlite3 -readonly -json "$db" 'SELECT id, title FROM threads' 2>/dev/null) || continue
     printf 'CODEX_DB_TITLES\\t%s\\n' "$(printf '%s' "$titles" | base64 | tr -d '\\n')"
     break
   done

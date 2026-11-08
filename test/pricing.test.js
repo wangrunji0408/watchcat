@@ -755,7 +755,7 @@ test('recognizes Codex auto-review as a guardian subagent', () => {
   assert.equal(review.parentFile, '/tmp/parent.jsonl');
 });
 
-test('prices Codex auto-review usage using its recorded underlying model', () => {
+test('prices Codex auto-review usage at its own rate even with a recorded underlying model', () => {
   const responseId = 'resp_' + Buffer.from(
     'litellm:custom_llm_provider:openai;model_id:azure-gpt-5.4-mini;response_id:example',
   ).toString('base64');
@@ -780,7 +780,7 @@ test('prices Codex auto-review usage using its recorded underlying model', () =>
   assert.equal(summary.model, 'codex-auto-review');
   assert.equal(summary.cost.complete, true);
   assert.deepEqual(summary.cost.unknownModels, []);
-  assert.ok(summary.cost.usd > 0);
+  assert.ok(Math.abs(summary.cost.usd - (900 * .15 + 100 * .003 + 100 * .6) / 1e6) < 1e-12);
   assert.equal(summary.usage.requests, 1);
 });
 
@@ -982,6 +982,15 @@ test('uses long-context prices above 272K input tokens', () => {
   const result = summarizeUsageRecords([{ model: 'gpt-5.4', usage }]);
 
   assert.equal(result.cost.usd, 1.5225);
+});
+
+test('prices GPT-6.1 Terra at short and long-context rates', () => {
+  const price = priceForModel('gpt-6.1-terra');
+  assert.deepEqual([price.input, price.cached, price.output, price.long], [1, .05, 5, [2, .1, 7.5]]);
+  const short = normalizedUsage({ input_tokens: 100_000, cached_input_tokens: 10_000, output_tokens: 100_000 }, 'codex');
+  assert.equal(summarizeUsageRecords([{ model: 'gpt-6.1-terra', usage: short }]).cost.usd, .5905);
+  const long = normalizedUsage({ input_tokens: 300_000, output_tokens: 1_000_000, cache_write_tokens: 100_000 }, 'codex');
+  assert.equal(summarizeUsageRecords([{ model: 'gpt-6.1-terra', usage: long }]).cost.usd, 8.35);
 });
 
 test('uses the current GPT-5.6 Luna prices, including cache writes', () => {
@@ -1674,6 +1683,11 @@ test('reads Codex title changes independently of rollout files', () => {
       assert.equal(readCodexTitles(dir).get('example'), 'Database title');
       db.prepare('UPDATE threads SET title = ?').run('Renamed title');
       assert.equal(readCodexTitles(dir).get('example'), 'Renamed title');
+      db.exec('ALTER TABLE threads ADD COLUMN name TEXT');
+      db.prepare('UPDATE threads SET name = ?').run('Display name');
+      assert.equal(readCodexTitles(dir).get('example'), 'Display name');
+      db.prepare('UPDATE threads SET name = ?').run('');
+      assert.equal(readCodexTitles(dir).get('example'), 'Renamed title');
     } finally { db.close(); }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -1683,7 +1697,7 @@ test('reads remote Codex title metadata separately from session logs', () => {
   const encode = value => Buffer.from(value).toString('base64');
   const scan = parseRemoteScan([
     'CODEX_TITLES\t' + encode(JSON.stringify({ id: 'remote-example', thread_name: 'Index title' })),
-    'CODEX_DB_TITLES\t' + encode(JSON.stringify([{ id: 'remote-example', title: '远端标题\n第二行' }])),
+    'CODEX_DB_TITLES\t' + encode(JSON.stringify([{ id: 'remote-example', title: '旧标题', name: '远端标题\n第二行' }])),
   ].join('\n'));
   assert.equal(scan.codexTitles.get('remote-example'), '远端标题\n第二行');
 });
