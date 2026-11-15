@@ -16,7 +16,9 @@ const HOME = os.homedir();
 const CLAUDE_DIR = path.join(HOME, '.claude', 'projects');
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(HOME, '.codex'));
 const CODEX_DIR = path.join(CODEX_HOME, 'sessions');
-const DSH_DIR = path.join(HOME, '.dsh', 'sessions');
+const DSH_HOME = path.resolve(process.env.DSH_HOME || path.join(HOME, '.dsh'));
+const DSH_DIR = path.join(DSH_HOME, 'sessions');
+const DSH_IMAGE_DIR = path.join(DSH_HOME, 'attachments', 'v1', 'objects');
 const CETUS_DIR = path.join(HOME, 'Library', 'Application Support', 'dev.cetus.app', 'sessions');
 const OPENCLAW_DIR = path.resolve(process.env.OPENCLAW_STATE_DIR || path.join(HOME, '.openclaw'));
 const OPENCLAW_AGENTS_DIR = path.join(OPENCLAW_DIR, 'agents');
@@ -128,8 +130,11 @@ const MODEL_PRICES = [
   { test: /deepseek[-.]v4[-.]pro(?:\b|$)/, name: 'DeepSeek V4 Pro', input: .435, cached: .003625, output: .87 },
   { test: /deepseek[-.]v4[-.]flash(?:\b|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
   { test: /deepseek[-.](?:chat|reasoner)(?:\b|$)/, name: 'DeepSeek V4 Flash', input: .14, cached: .0028, output: .28 },
-  // Kimi: https://platform.kimi.com/docs/pricing
-  { test: /kimi[-.]k3(?:\b|$)/, name: 'Kimi K3', input: 3, cached: .3, output: 15 },
+  // Kimi: https://platform.kimi.ai/docs/pricing/chat (verified 2026-10-24, USD / MTok).
+  // Match variants before K3; all K3 models use separate 5m / 1h cache write rates.
+  { test: /kimi[-.]k3[-.]1[-.]pro[-.]highspeed(?:\b|$)/, name: 'Kimi K3.1 Pro HighSpeed', input: 4, cached: .2, cacheWrite5m: 4, cacheWrite1h: 8, output: 20 },
+  { test: /kimi[-.]k3[-.]1[-.]pro(?:\b|$)/, name: 'Kimi K3.1 Pro', input: 2, cached: .2, cacheWrite5m: 2, cacheWrite1h: 4, output: 10 },
+  { test: /kimi[-.]k3(?:$|-(?![0-9])|\s)/, name: 'Kimi K3', input: 3, cached: .3, cacheWrite5m: 3, cacheWrite1h: 6, output: 15 },
   { test: /kimi[-.]k2[-.]7[-.]code[-.]highspeed(?:\b|$)/, name: 'Kimi K2.7 Code HighSpeed', input: 1.9, cached: .38, output: 8 },
   { test: /kimi[-.]k2[-.]7[-.]code(?:\b|$)/, name: 'Kimi K2.7 Code', input: .95, cached: .19, output: 4 },
   { test: /kimi[-.]k2[-.]7(?:\b|$)/, name: 'Kimi K2.7', input: .95, cached: .19, output: 4 },
@@ -353,7 +358,7 @@ let openFilesCache = { at: 0, files: new Set() };
 function getOpenJsonlFiles() {
   return new Promise((resolve) => {
     if (Date.now() - openFilesCache.at < 3000) return resolve(openFilesCache.files);
-    execFile('lsof', ['-F', 'n', '-c', 'claude', '-c', 'codex', '-c', 'dsh', '-c', 'Cetus', '-c', 'openclaw', '-c', 'node'],
+    execFile('lsof', ['-F', 'n', '-c', 'claude', '-c', 'codex', '-c', 'dsh', '-c', 'kimi', '-c', 'Cetus', '-c', 'openclaw', '-c', 'node'],
       { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
         const files = new Set();
         if (stdout) {
@@ -887,6 +892,277 @@ function summarizeCodex(file, stat, content) {
   };
 }
 
+// Kimi Code keeps a full event log alongside a compacted context snapshot.
+const KIMI_HOME = path.resolve(process.env.KIMI_SHARE_DIR || path.join(HOME, '.kimi'));
+const KIMI_DIR = path.join(KIMI_HOME, 'sessions');
+const KIMI_CODE_HOME = path.resolve(process.env.KIMI_CODE_HOME || path.join(HOME, '.kimi-code'));
+const KIMI_CODE_DIR = path.join(KIMI_CODE_HOME, 'sessions');
+
+function readKimiJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; }
+}
+
+function listKimiSessionFiles(dir = KIMI_DIR) {
+  const files = [];
+  for (const project of safeReadDir(dir)) {
+    if (!project.isDirectory()) continue;
+    const projectDir = path.join(dir, project.name);
+    for (const entry of safeReadDir(projectDir)) {
+      const file = path.join(projectDir, entry.name);
+      if (entry.isDirectory()) {
+        const agentsDir = path.join(file, 'agents');
+        for (const agent of safeReadDir(agentsDir)) {
+          if (!agent.isDirectory()) continue;
+          const agentWire = path.join(agentsDir, agent.name, 'wire.jsonl');
+          if (fs.existsSync(agentWire)) files.push(agentWire);
+        }
+        if (fs.existsSync(path.join(agentsDir, 'main', 'wire.jsonl'))) continue;
+        const wire = path.join(file, 'wire.jsonl');
+        const context = path.join(file, 'context.jsonl');
+        // An empty/header-only wire file does not contain any history yet.
+        let hasEvents = false;
+        let fd;
+        try {
+          fd = fs.openSync(wire, 'r');
+          const prefix = Buffer.alloc(4096);
+          const length = fs.readSync(fd, prefix, 0, prefix.length, 0);
+          hasEvents = /"message"\s*:\s*\{/.test(prefix.toString('utf8', 0, length));
+        } catch {} finally { if (fd !== undefined) fs.closeSync(fd); }
+        if (hasEvents) files.push(wire);
+        else if (fs.existsSync(context)) files.push(context);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl') &&
+          !fs.existsSync(path.join(projectDir, entry.name.slice(0, -6)))) files.push(file);
+    }
+  }
+  return files;
+}
+
+function kimiTimestamp(value) {
+  return isoTime(typeof value === 'number' ? value * 1000 : value);
+}
+
+function parseKimi(file, content) {
+  const lines = content == null ? parseLines(file) : parseJsonLines(content);
+  const messages = [], calls = new Map(), usageRecords = [], peaks = [];
+  let contextTokens = null, peak = 0, model = null, lastCall = null, mergeText = false;
+  let cwd = null, thinkingEffort = null;
+  const models = new Set();
+  const hasPrompts = lines.some(row => row?.type === 'turn.prompt');
+  const pushText = (role, text, ts, merge = false) => {
+    if (!text) return;
+    const previous = messages.at(-1);
+    if (merge && mergeText && previous?.role === role) previous.text += text;
+    else messages.push({ role, text, ts });
+    mergeText = merge;
+  };
+  const updateCall = call => {
+    call.input = truncate(call.arguments, 400);
+    Object.assign(call, toolRenderData(call.toolName, call.arguments));
+    call.text = call.toolName + ' ' + call.input;
+  };
+  const toolCall = (p, ts) => {
+    const fn = p.function || p;
+    const call = { role: 'tool_use', toolName: fn.name, callId: p.id,
+      arguments: fn.arguments || '', ts };
+    updateCall(call);
+    messages.push(call);
+    calls.set(p.id, call);
+    lastCall = call;
+    mergeText = false;
+  };
+  const toolResult = (id, output, ts, isError = false) => {
+    const call = calls.get(id);
+    const text = extractText(output);
+    messages.push({ role: 'tool_result', callId: id, toolName: call?.toolName,
+      text, output: text, isError, ts, ...(call?.read ? { readContent: text } : {}) });
+    mergeText = false;
+  };
+  for (const row of lines) {
+    if (!row || typeof row !== 'object') continue;
+    const ts = row.time != null ? isoTime(row.time) : kimiTimestamp(row.timestamp);
+    // Node.js Kimi Code 1.5 logs: milliseconds, flat events and camelCase usage.
+    if (row.type === 'profile.bind' || row.type === 'llm.request') {
+      model = row.model || model;
+      cwd = row.environmentDisclosure?.cwd || cwd;
+      thinkingEffort = row.thinkingEffort || thinkingEffort;
+      if (model) models.add(model);
+      continue;
+    }
+    if (row.type === 'usage.record') {
+      const u = row.usage || {};
+      model = row.model || model;
+      if (model) models.add(model);
+      contextTokens = Number(u.inputOther || 0) + Number(u.inputCacheRead || 0) + Number(u.inputCacheCreation || 0);
+      peak = Math.max(peak, contextTokens);
+      usageRecords.push({ model, ts, usage: normalizedUsage({ input_tokens: u.inputOther,
+        output_tokens: u.output, cache_read_input_tokens: u.inputCacheRead,
+        cache_creation_input_tokens: u.inputCacheCreation,
+        cache_creation: u.cacheCreation, cache_write_1h_tokens: u.inputCacheCreation1h }, 'kimi') });
+      continue;
+    }
+    if (row.type === 'token_counting.measured') {
+      contextTokens = Number(row.tokens || 0);
+      peak = Math.max(peak, contextTokens);
+      continue;
+    }
+    if (row.type === 'turn.prompt') {
+      pushText('user', extractText(row.input), ts);
+      continue;
+    }
+    if (row.type === 'agent.message.appended' && !hasPrompts && row.message?.message?.role === 'user') {
+      pushText('user', extractText(row.message.message.content), ts);
+      continue;
+    }
+    if (row.type === 'context.append_loop_event') {
+      const e = row.event || {};
+      if (e.type === 'content.part') {
+        if (e.part?.type === 'text') pushText('assistant', e.part.text, ts, true);
+        else if (e.part?.type === 'think') pushText('thinking', e.part.think, ts, true);
+      } else if (e.type === 'tool.call') {
+        toolCall({ id: e.toolCallId, function: { name: e.name, arguments: JSON.stringify(e.args || {}) } }, ts);
+      } else if (e.type === 'tool.result') {
+        toolResult(e.toolCallId, e.result?.output || e.result?.note, ts, e.result?.isError);
+      } else if (e.type === 'step.begin' || e.type === 'step.end') {
+        mergeText = false;
+        lastCall = null;
+      } else if (e.type === 'compaction.begin') {
+        if (peak) peaks.push(peak);
+        peak = 0;
+        contextTokens = null;
+        messages.push({ role: 'compaction', text: '上下文已压缩', ts });
+        mergeText = false;
+      }
+      continue;
+    }
+    if (row.type === 'subagent.spawned' || row.type === 'subagent.completed') {
+      messages.push({ role: 'subagent', event: row.type === 'subagent.spawned' ? 'started' : 'completed',
+        agentId: row.subagentId, title: row.description || null,
+        text: row.resultSummary || row.description || 'Agent 已创建', ts });
+      mergeText = false;
+      continue;
+    }
+    const event = row.message;
+    if (event?.type) {
+      const p = event.payload || {};
+      if (event.type === 'TurnBegin' || event.type === 'SteerInput') {
+        pushText('user', extractText(p.user_input), ts);
+      } else if (event.type === 'TextPart') pushText('assistant', p.text, ts, true);
+      else if (event.type === 'ThinkPart') pushText('thinking', p.think, ts, true);
+      else if (event.type === 'ToolCall') toolCall(p, ts);
+      else if (event.type === 'ToolCallPart' && lastCall) {
+        lastCall.arguments += p.arguments_part || '';
+        updateCall(lastCall);
+      } else if (event.type === 'ToolResult') {
+        const result = p.return_value || {};
+        toolResult(p.tool_call_id, result.output || result.message, ts, result.is_error);
+      } else if (event.type === 'StatusUpdate') {
+        model = p.model || model;
+        if (p.context_tokens != null) contextTokens = Number(p.context_tokens);
+        const u = p.token_usage;
+        if (u) {
+          if (p.context_tokens == null) contextTokens = Number(u.input_other || 0) +
+            Number(u.input_cache_read || 0) + Number(u.input_cache_creation || 0);
+          usageRecords.push({ model, ts, usage: normalizedUsage({ input_tokens: u.input_other,
+            output_tokens: u.output, cache_read_input_tokens: u.input_cache_read,
+            cache_creation_input_tokens: u.input_cache_creation }, 'kimi') });
+        }
+        peak = Math.max(peak, contextTokens || 0);
+      } else if (event.type === 'CompactionBegin') {
+        if (peak) peaks.push(peak);
+        peak = 0;
+        contextTokens = null;
+        messages.push({ role: 'compaction', text: '上下文已压缩', ts });
+        mergeText = false;
+      } else if (['StepBegin', 'TurnEnd', 'StepInterrupted'].includes(event.type)) {
+        mergeText = false;
+        lastCall = null;
+      }
+      continue;
+    }
+    // Older sessions may only have a context snapshot (no timestamps/usage history).
+    if (row.role === '_usage') {
+      contextTokens = Number(row.token_count ?? row.tokens ?? 0);
+      continue;
+    }
+    if (row.role === 'tool') toolResult(row.tool_call_id, row.content, ts);
+    else if (row.role === 'user' || row.role === 'assistant') {
+      if (Array.isArray(row.content)) {
+        for (const part of row.content) {
+          if (part?.type === 'think') pushText('thinking', part.think, ts);
+          else if (part?.type === 'text') pushText(row.role, part.text, ts, true);
+        }
+      } else pushText(row.role, extractText(row.content), ts);
+      for (const call of row.tool_calls || []) toolCall(call, ts);
+      mergeText = false;
+    }
+  }
+  return { messages, usageRecords, contextTokens, contextPeaks: peaks, model,
+    models: [...new Set([...models, ...usageRecords.map(r => r.model).filter(Boolean)])], cwd, thinkingEffort };
+}
+
+function detailKimi(file, content) {
+  return parseKimi(file, content).messages;
+}
+
+function summarizeKimi(file, stat, content) {
+  const parsed = parseKimi(file, content);
+  const turns = parsed.messages.filter(m => m.role === 'user' || m.role === 'assistant');
+  if (!parsed.messages.length) return null;
+  const firstUser = turns.find(m => m.role === 'user');
+  const lastAssistant = turns.filter(m => m.role === 'assistant').at(-1);
+  const times = parsed.messages.map(m => m.ts).filter(Boolean);
+  const activity = new Map();
+  for (const m of turns) bumpDate(activity, m.ts);
+  const totals = summarizeUsageRecords(parsed.usageRecords);
+  return { source: 'kimi', id: path.basename(file) === 'wire.jsonl' || path.basename(file) === 'context.jsonl'
+    ? path.basename(path.dirname(file)) : path.basename(file, '.jsonl'), file,
+    project: parsed.cwd || '(未知项目)', title: truncate(firstUser?.text || '(无标题)', 80),
+    lastMessage: truncate(lastAssistant?.text || '', 120),
+    firstTs: times[0] || isoTime(stat.birthtimeMs || stat.mtimeMs),
+    lastTs: times.at(-1) || isoTime(stat.mtimeMs), turns: turns.length,
+    gitBranch: null, version: 'Kimi Code', model: parsed.model,
+    models: parsed.models, thinkingEffort: parsed.thinkingEffort,
+    contextTokens: parsed.contextTokens, contextPeaks: parsed.contextPeaks,
+    usage: totals.usage, cost: totals.cost, daily: summarizeDailyRecords(parsed.usageRecords),
+    activity: activityFromMap(activity), sizeBytes: stat.size, sessionKind: 'agent' };
+}
+
+function decorateKimiSummary(summary, projects) {
+  if (!summary) return null;
+  if (path.basename(path.dirname(path.dirname(summary.file))) === 'agents') {
+    const agentDir = path.dirname(summary.file);
+    const agentId = path.basename(agentDir);
+    const sessionDir = path.dirname(path.dirname(agentDir));
+    const state = readKimiJson(path.join(sessionDir, 'state.json'));
+    const agent = state.agents?.[agentId] || {};
+    const isSubagent = agentId !== 'main';
+    return { ...summary, id: isSubagent ? `${state.id || path.basename(sessionDir)}:${agentId}` : state.id || path.basename(sessionDir),
+      project: state.cwd || summary.project,
+      title: truncate(isSubagent ? agent.description || summary.title : state.title || summary.title, 80),
+      sessionKind: isSubagent ? 'subagent' : 'agent',
+      ...(isSubagent ? { agentId, subagentType: agent.type || 'kimi',
+        parentFile: path.join(sessionDir, 'agents', agent.parentAgentId || 'main', 'wire.jsonl') } : {}) };
+  }
+  const modern = ['wire.jsonl', 'context.jsonl'].includes(path.basename(summary.file));
+  const sessionDir = modern ? path.dirname(summary.file) : null;
+  const projectKey = path.basename(modern ? path.dirname(sessionDir) : path.dirname(summary.file));
+  const state = sessionDir ? readKimiJson(path.join(sessionDir, 'state.json')) : {};
+  const legacy = sessionDir ? readKimiJson(path.join(sessionDir, 'metadata.json')) : {};
+  return { ...summary, project: projects.get(projectKey) || summary.project,
+    title: truncate(state.custom_title || legacy.title || summary.title, 80) };
+}
+
+function kimiProjects(home = KIMI_HOME) {
+  const projects = new Map();
+  for (const entry of readKimiJson(path.join(home, 'kimi.json')).work_dirs || []) {
+    if (typeof entry.path !== 'string') continue;
+    const hash = crypto.createHash('md5').update(entry.path).digest('hex');
+    projects.set(hash, entry.path);
+    if (entry.kaos) projects.set(entry.kaos + '_' + hash, entry.path);
+  }
+  return projects;
+}
+
 // DeepSeek Harness 会话摘要（~/.dsh/sessions/**/session.jsonl.zstd）
 function summarizeDsh(file, stat, content) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
@@ -919,11 +1195,11 @@ function summarizeDsh(file, stat, content) {
       goalObjective = d.goal?.objective || goalObjective;
     } else if (l.type === 'session/title' && d.title) {
       title = d.title;
-    } else if (l.type === 'request/header') {
-      const config = d.header && d.header.config || {};
+    } else if (l.type === 'request/header' || l.type === 'model/selection') {
+      const config = l.type === 'model/selection' ? d : d.header?.config || {};
       if (config.model) { model = config.model; models.add(model); }
       thinkingEffort = config.reasoningEffort || config.reasoning_effort || thinkingEffort;
-    } else if (l.type === 'compact/start') {
+    } else if (l.type === 'compact/start' || l.type === 'compaction/start') {
       if (contextPeak) contextPeaks.push(contextPeak);
       contextPeak = 0;
       contextTokens = null;
@@ -934,10 +1210,12 @@ function summarizeDsh(file, stat, content) {
         hasGoalEvent = true;
         goalObjective = goalEvent.objective || goalObjective;
       }
-      if (text && !parseDshAgentMessage(d) && !parseDshBackgroundTask(d) && !goalEvent && !parseDshRuntimeContext(d) &&
-          !isNoiseUserText(text) && !isDshCompactionMessage(text)) {
+      const hasImage = dshImageAttachments(d.content).length > 0;
+      if ((text || hasImage) && !parseDshAgentMessage(d) && !parseDshSubagentNotice(d) &&
+          !parseDshBackgroundTask(d) && !goalEvent && !parseDshRuntimeContext(d) &&
+          d.source?.kind !== 'compact-checkpoint' && !isNoiseUserText(text) && !isDshCompactionMessage(text)) {
         userCount++;
-        if (!firstUserText) firstUserText = text;
+        if (!firstUserText) firstUserText = text || null;
         bumpDate(activityByDay, ts);
       }
     } else if (l.type === 'assistant/message' && d.message) {
@@ -966,7 +1244,7 @@ function summarizeDsh(file, stat, content) {
   }
   // Goal-driven sessions can spend a long time emitting only reasoning and
   // tool calls. Keep them visible even before the first plain-text response.
-  if (!firstUserText && !agentCount && !hasGoalEvent) return null;
+  if (!userCount && !agentCount && !hasGoalEvent) return null;
   const totals = summarizeUsageRecords(usageRecords);
   return {
     source: 'dsh',
@@ -1776,6 +2054,7 @@ function getSummary(file, kind) {
   let summary = null;
   try {
     if (kind === 'claude') summary = summarizeClaude(file, stat);
+    else if (kind === 'kimi') summary = summarizeKimi(file, stat);
     else if (kind === 'dsh') summary = summarizeDsh(file, stat);
     else if (kind === 'openclaw') summary = summarizeOpenClaw(file, stat);
     else if (kind === 'cetus') summary = summarizeCetus(file, stat);
@@ -2090,7 +2369,7 @@ function parseToolArgs(raw) {
 }
 
 function extractBashCall(name, raw) {
-  if (!['bash', 'terminal', 'exec_command'].includes(shortToolName(name))) return null;
+  if (!['bash', 'shell', 'terminal', 'exec_command'].includes(shortToolName(name))) return null;
   const args = parseToolArgs(raw);
   if (!args) return null;
   const command = args.command ?? args.cmd;
@@ -2426,26 +2705,54 @@ function codexCompactionDetails(line) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
   };
-  const summaryValue = details.summary ?? details.message ?? details.compacted_summary;
-  const summary = typeof summaryValue === 'string' ? summaryValue
-    : extractText(summaryValue) || extractText(summaryValue && summaryValue.content) ||
-      (summaryValue && typeof summaryValue.text === 'string' ? summaryValue.text : '');
+  const summary = [details.summary, details.message, details.compacted_summary]
+    .map(value => (extractText(value) || extractText(value?.content) ||
+      (typeof value?.text === 'string' ? value.text : '')).trim())
+    .find(Boolean) || '';
+  const retained = details.retained_context;
+  const encrypted = Array.isArray(details.replacement_history) && details.replacement_history.some(item =>
+    item?.type === 'compaction' && typeof item.encrypted_content === 'string' && item.encrypted_content.length > 0);
+  const checkpoint = {
+    encrypted,
+    windowNumber: Number.isSafeInteger(details.window_number) ? details.window_number : null,
+    userMessages: Array.isArray(retained?.user_messages) ? retained.user_messages.length : null,
+    assistantMessages: Array.isArray(retained?.assistant_messages) ? retained.assistant_messages.length : null,
+  };
   return {
     eventType,
     trigger: details.trigger || null,
     beforeTokens: number(details.pre_tokens, details.preTokens, details.tokens_before, details.tokensBefore),
     afterTokens: number(details.post_tokens, details.postTokens, details.tokens_after, details.tokensAfter),
     durationMs: number(details.duration_ms, details.durationMs),
-    summary: summary.trim(),
+    summary,
+    checkpoint,
   };
 }
 
-function detailCodex(file, content) {
+function codexToolOutput(output, includeImages) {
+  const content = Array.isArray(output) ? output : output?.content;
+  if (!Array.isArray(content)) {
+    return { text: extractText(output) || extractText(content) || JSON.stringify(output ?? ''), images: [] };
+  }
+  const imageBlocks = content.filter(block => block?.type === 'input_image');
+  // Preview only raster bytes stored in the rollout. ImageView events also
+  // record local paths, but those paths can change or point outside the session.
+  const images = includeImages ? imageBlocks.map(block => block.image_url).filter(url =>
+    typeof url === 'string' && /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(url)) : [];
+  const text = extractText(content);
+  return { text: text || (imageBlocks.length ? '' : JSON.stringify(output)), images };
+}
+
+function detailCodex(file, content, includeImages = true) {
   const parsedLines = content == null ? parseLines(file) : parseJsonLines(content);
   const { lines, subagent } = codexOwnSessionLines(parsedLines);
   const compactionSourceItems = codexCompactionSourceItems(lines);
-  const hasConversationEvents = lines.some(line => line.type === 'event_msg' &&
-    ['user_message', 'agent_message'].includes(line.payload?.type));
+  const conversationEventRoles = new Set();
+  for (const line of lines) {
+    if (line.type !== 'event_msg' || !line.payload?.message) continue;
+    if (line.payload.type === 'user_message') conversationEventRoles.add('user');
+    if (line.payload.type === 'agent_message') conversationEventRoles.add('assistant');
+  }
   const msgs = [];
   const readCalls = new Set();
   const agentCalls = new Map();
@@ -2479,6 +2786,7 @@ function detailCodex(file, content) {
         afterTokens: compaction.afterTokens,
         durationMs: compaction.durationMs,
         summary: compaction.summary,
+        checkpoint: compaction.checkpoint,
       };
       msgs.push(message);
       pendingCompaction = message;
@@ -2506,7 +2814,7 @@ function detailCodex(file, content) {
       }
     } else if (l.type === 'response_item') {
       if (compactionSourceItems.has(l)) continue;
-      if (!hasConversationEvents && p.type === 'message') {
+      if (p.type === 'message' && !conversationEventRoles.has(p.role)) {
         const text = codexResponseMessageText(p);
         if (text) msgs.push({ role: p.role, text, ts: l.timestamp });
       } else if (p.type === 'reasoning') {
@@ -2541,12 +2849,11 @@ function detailCodex(file, content) {
           }
           continue;
         }
-        const out = extractText(p.output) || extractText(p.output && p.output.content) ||
-          JSON.stringify(p.output || '');
-        const rawOutput = String(out);
+        const { text: rawOutput, images } = codexToolOutput(p.output, includeImages);
         const isRead = p.call_id && readCalls.has(p.call_id);
         const output = isRead ? rawOutput : truncateBlock(rawOutput, 600);
         msgs.push({ role: 'tool_result', ts: l.timestamp, callId: p.call_id || null, output, text: output,
+          ...(images.length ? { images } : {}),
           ...(isRead ? { readContent: rawOutput } : {}) });
       }
     }
@@ -2567,6 +2874,37 @@ function dshToolResultText(message) {
   return parts.join('\n');
 }
 
+function dshImageAttachments(content) {
+  return Array.isArray(content) ? content.filter(block => block?.type === 'image' && block.attachment)
+    .map(block => block.attachment) : [];
+}
+
+function dshImageUrls(content, objectsDir) {
+  if (!objectsDir) return [];
+  const images = [];
+  for (const ref of dshImageAttachments(content)) {
+    const digest = /^sha256:([a-f0-9]{64})$/.exec(ref.attachmentId)?.[1];
+    const type = ref.mediaType;
+    if (!digest || !/^image\/(png|jpeg|webp|gif)$/.test(type) ||
+        !Number.isSafeInteger(ref.bytes) || ref.bytes <= 0 || ref.bytes > 16 * 1024 * 1024) continue;
+    try {
+      const root = fs.realpathSync(objectsDir);
+      const file = fs.realpathSync(path.join(root, digest.slice(0, 2), digest));
+      if (!file.startsWith(root + path.sep)) continue;
+      const stat = fs.statSync(file);
+      if (!stat.isFile() || stat.size !== ref.bytes) continue;
+      const bytes = fs.readFileSync(file);
+      if (bytes.length !== ref.bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== digest) continue;
+      const matches = type === 'image/png' ? bytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a'
+        : type === 'image/jpeg' ? bytes.subarray(0, 3).toString('hex') === 'ffd8ff'
+        : type === 'image/webp' ? bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP'
+        : /^GIF8[79]a$/.test(bytes.toString('ascii', 0, 6));
+      if (matches) images.push(`data:${type};base64,${bytes.toString('base64')}`);
+    } catch { /* Attachments may have been removed while keeping the log. */ }
+  }
+  return images;
+}
+
 function isDshCompactionMessage(text) {
   return typeof text === 'string' &&
     (text.includes('<compacted-summary>') ||
@@ -2581,7 +2919,7 @@ const DSH_BACKGROUND_TASK_PLUGINS = new Set(['tool-tasks', 'tool-jobs']);
 
 function parseDshBackgroundTask(message) {
   const source = message && message.source;
-  if (!source || source.kind !== 'plugin' || !DSH_BACKGROUND_TASK_PLUGINS.has(source.plugin)) return null;
+  if (!source || !DSH_BACKGROUND_TASK_PLUGINS.has(source.kind === 'plugin' ? source.plugin : source.kind)) return null;
   const text = extractText(message.content);
   const head = text.match(/^background (?:task|job) (\S+)/i);
   if (!head) return null;
@@ -2649,8 +2987,10 @@ function parseDshGoalEvent(message) {
 }
 
 function parseDshRuntimeContext(message) {
-  if (!message || message.source?.kind !== 'plugin' ||
-      !['@deepseek-ai/dsh-system-prompt', 'user-approval'].includes(message.source.plugin)) return null;
+  const source = message?.source;
+  const kind = source?.kind === 'plugin' ? source.plugin : source?.kind;
+  if (!['@deepseek-ai/dsh-system-prompt', 'user-approval', 'runtime-context', 'time-context',
+    'skill-catalog', 'agent-instructions', 'tool-goal'].includes(kind)) return null;
   const text = extractText(message.content);
   return text ? { role: 'runtime_context', text } : null;
 }
@@ -2696,7 +3036,7 @@ function parseDshTodoWrite(raw) {
   };
 }
 
-function detailDsh(file, content) {
+function detailDsh(file, content, objectsDir = DSH_IMAGE_DIR) {
   const lines = content == null ? parseLines(file) : parseJsonLines(content);
   const msgs = [];
   const readCalls = new Set();
@@ -2706,6 +3046,12 @@ function detailDsh(file, content) {
   let contextPeak = 0;
   let pendingCompaction = null;
   const seenAgentMessages = new Set();
+  const seenBackgroundTasks = new Set();
+  const pushBackgroundTask = (task, ts) => {
+    if (seenBackgroundTasks.has(task.taskId)) return;
+    seenBackgroundTasks.add(task.taskId);
+    msgs.push({ ...task, ts });
+  };
   // 同一条 relay 既会出现在 agent/inbox/spliced，也会作为 user/message 投递，
   // 用消息 id 去重，只渲染一次。
   const pushAgentMessage = (relay, ts) => {
@@ -2728,11 +3074,11 @@ function detailDsh(file, content) {
   for (const l of lines) {
     const d = l.data || {};
     const ts = isoTime(l.time ?? l.createdAt);
-    if (l.type === 'compact/start') {
+    if (l.type === 'compact/start' || l.type === 'compaction/start') {
       flushCompaction(ts);
       pendingCompaction = {
         ts,
-        trigger: 'auto',
+        trigger: d.sourceCommandId ? 'manual' : 'auto',
         beforeTokens: contextPeak || null,
         turn: d.turn ?? null,
         summary: '',
@@ -2741,13 +3087,13 @@ function detailDsh(file, content) {
         model: null,
       };
       contextPeak = 0;
-    } else if (l.type === 'compact/summary') {
+    } else if (l.type === 'compact/summary' || l.type === 'compaction/summary') {
       if (!pendingCompaction) pendingCompaction = { ts, trigger: 'auto', beforeTokens: null, turn: null };
       pendingCompaction.summary = extractText(d.summary) || extractText(d.rawOutput);
       pendingCompaction.shadowedTokens = d.shadowedTokenCount ?? null;
       pendingCompaction.shadowedRange = d.shadowedRange || null;
       pendingCompaction.model = d.model || null;
-    } else if (l.type === 'compact/end') {
+    } else if (l.type === 'compact/end' || l.type === 'compaction/end') {
       flushCompaction(ts);
     } else if (l.type === 'goal/change') {
       const goalEvent = parseDshGoalEvent(d);
@@ -2772,14 +3118,19 @@ function detailDsh(file, content) {
       } else if (goalEvent) {
         msgs.push({ ...goalEvent, ts });
       } else if (backgroundTask) {
-        msgs.push({ ...backgroundTask, ts });
-      } else if (value && !isNoiseUserText(value) && !isDshCompactionMessage(value)) {
-        msgs.push({ role: 'user', text: value, ts });
+        pushBackgroundTask(backgroundTask, ts);
+      } else if (d.source?.kind !== 'compact-checkpoint' && !isNoiseUserText(value) && !isDshCompactionMessage(value)) {
+        const images = dshImageUrls(d.content, objectsDir);
+        if (value || dshImageAttachments(d.content).length) {
+          msgs.push({ role: 'user', text: value, ts, ...(images.length ? { images } : {}) });
+        }
       }
     } else if (l.type === 'agent/inbox/spliced') {
       for (const message of Array.isArray(d.inserted) ? d.inserted : []) {
         const relay = parseDshAgentMessage(message);
         if (relay) { pushAgentMessage(relay, ts); continue; }
+        const task = parseDshBackgroundTask(message);
+        if (task) { pushBackgroundTask(task, ts); continue; }
         const notice = parseDshSubagentNotice(message);
         if (notice && notice.event === 'completed' &&
             !msgs.some(item => item.role === 'subagent' && item.event === 'completed' && item.agentId === notice.agentId)) {
@@ -2827,7 +3178,9 @@ function detailDsh(file, content) {
       if (callId) completedCalls.add(callId);
       const isRead = callId && readCalls.has(callId);
       const output = isRead ? rawOutput : truncate(rawOutput, 600);
+      const images = dshImageUrls(d.message?.content, objectsDir);
       msgs.push({ role: 'tool_result', ts, toolName: toolNamesByCall.get(callId) || '?', callId, output, text: output,
+        ...(images.length ? { images } : {}),
         ...(isRead ? { readContent: rawOutput } : {}) });
     }
   }
@@ -3095,6 +3448,8 @@ async function collectSessions() {
   const claudeFiles = listClaudeSessionFiles();
   const codexFiles = listFilesRecursive(CODEX_DIR, '.jsonl');
   const codexTitles = readCodexTitles();
+  const kimiFiles = [...listKimiSessionFiles(), ...listKimiSessionFiles(KIMI_CODE_DIR)];
+  const projects = kimiProjects();
   const dshFiles = listDshSessionFiles();
   const cetusFiles = listFilesRecursive(CETUS_DIR, '.jsonl');
   const openClawEntries = listOpenClawSessionEntries();
@@ -3108,6 +3463,10 @@ async function collectSessions() {
   }
   for (const f of codexFiles) {
     const s = applyCodexTitle(getSummary(f, 'codex'), codexTitles);
+    if (s) sessions.push(s);
+  }
+  for (const f of kimiFiles) {
+    const s = decorateKimiSummary(getSummary(f, 'kimi'), projects);
     if (s) sessions.push(s);
   }
   for (const f of dshFiles) {
@@ -3257,7 +3616,7 @@ async function apiStats() {
   };
 }
 
-function apiSessionDetail(query) {
+function apiSessionDetail(query, includeImages = false) {
   const file = query.get('file');
   if (!file) throw httpError(400, 'missing file');
   if (file.startsWith('hermes:')) {
@@ -3272,22 +3631,24 @@ function apiSessionDetail(query) {
     if (!fs.existsSync(remote.cacheFile)) throw httpError(404, 'remote session cache not found');
     let messages = remote.kind === 'claude'
       ? detailClaude(remote.path, readRemoteContent(remote.cacheFile))
-      : detailCodex(remote.path, readRemoteContent(remote.cacheFile));
+      : detailCodex(remote.path, readRemoteContent(remote.cacheFile), includeImages);
     messages = attachSubagentEvents(messages, file);
     return { file, source: remote.kind, remoteHost: remote.host, messages };
   }
   const resolved = path.resolve(file);
   const inClaude = resolved.startsWith(CLAUDE_DIR + path.sep);
   const inCodex = resolved.startsWith(CODEX_DIR + path.sep);
+  const inKimi = resolved.startsWith(KIMI_DIR + path.sep) || resolved.startsWith(KIMI_CODE_DIR + path.sep);
   const inDsh = resolved.startsWith(DSH_DIR + path.sep);
   const inCetus = resolved.startsWith(CETUS_DIR + path.sep);
   const inOpenClaw = resolved.startsWith(OPENCLAW_AGENTS_DIR + path.sep);
-  if ((!inClaude && !inCodex && !inDsh && !inCetus && !inOpenClaw) ||
+  if ((!inClaude && !inCodex && !inDsh && !inCetus && !inOpenClaw && !inKimi) ||
       (!resolved.endsWith('.jsonl') && !resolved.endsWith('.jsonl.zstd'))) throw httpError(403, 'forbidden path');
   if (!fs.existsSync(resolved)) throw httpError(404, 'not found');
-  const source = inClaude ? 'claude' : inCodex ? 'codex' : inDsh ? 'dsh' : inCetus ? 'cetus' : 'openclaw';
-  let messages = inClaude ? detailClaude(resolved) : inCodex ? detailCodex(resolved) :
-    inDsh ? detailDsh(resolved) : inCetus ? detailCetus(resolved) : detailOpenClaw(resolved);
+  const source = inClaude ? 'claude' : inCodex ? 'codex' : inKimi ? 'kimi' : inDsh ? 'dsh' : inCetus ? 'cetus' : 'openclaw';
+  let messages = inClaude ? detailClaude(resolved) : inCodex ? detailCodex(resolved, undefined, includeImages) :
+    inKimi ? detailKimi(resolved) : inDsh ? detailDsh(resolved, undefined, includeImages ? DSH_IMAGE_DIR : null) :
+    inCetus ? detailCetus(resolved) : detailOpenClaw(resolved);
   messages = attachSubagentEvents(messages, resolved);
   return { file: resolved, source, messages };
 }
@@ -3297,6 +3658,13 @@ function httpError(code, msg) { const e = new Error(msg); e.statusCode = code; r
 // ---------- HTTP server ----------
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
+
+function requestAllowsSessionImages(req) {
+  // Session text is served on the LAN, but extracting image bytes is local only.
+  // Check both the socket and Host so a DNS rebind to loopback cannot read them.
+  return /^(?:127\.0\.0\.1|::ffff:127\.0\.0\.1|::1)$/.test(req.socket.remoteAddress || '') &&
+    /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(req.headers.host || '');
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -3314,8 +3682,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/api/session') {
-      const data = apiSessionDetail(url.searchParams);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      const data = apiSessionDetail(url.searchParams, requestAllowsSessionImages(req));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(data));
       return;
     }
@@ -3353,6 +3721,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  listKimiSessionFiles,
+  summarizeKimi,
+  detailKimi,
+  decorateKimiSummary,
+  kimiProjects,
   REMOTE_SCAN_SCRIPT,
   alignRemoteCacheFile,
   compressRemoteContent,
@@ -3365,6 +3738,7 @@ module.exports = {
   readCodexTitles,
   apiSessions,
   apiSessionDetail,
+  requestAllowsSessionImages,
   apiStats,
   attachSubagentEvents,
   summarizeDailyRecords,

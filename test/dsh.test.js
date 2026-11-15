@@ -3,7 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { listDshSessionFiles, summarizeDsh, detailDsh, linkDshSubagents } = require('../server');
+const crypto = require('node:crypto');
+const { listDshSessionFiles, summarizeDsh, detailDsh, linkDshSubagents,
+  requestAllowsSessionImages } = require('../server');
 
 // Hand-written synthetic records only; never copy local session contents here.
 const encode = rows => rows.map(JSON.stringify).join('\n');
@@ -47,6 +49,71 @@ test('renders v4 direct tool results, preserves read contents and matches toolCa
   assert.equal(detail[1].readContent, text);
   assert.equal(detail[3].toolName, 'bash');
   assert.equal(detail[3].output, 'Command failed Exit code: 1');
+});
+
+test('resolves v4 image attachments from the DSH object store', t => {
+  const objects = fs.mkdtempSync(path.join(os.tmpdir(), 'watchcat-dsh-images-'));
+  t.after(() => fs.rmSync(objects, { recursive: true, force: true }));
+  const base64 = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  const bytes = Buffer.from(base64, 'base64');
+  const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+  const bucket = path.join(objects, digest.slice(0, 2));
+  fs.mkdirSync(bucket);
+  fs.writeFileSync(path.join(bucket, digest), bytes);
+  const image = { type: 'image', attachment: {
+    attachmentId: `sha256:${digest}`, mediaType: 'image/gif', bytes: bytes.length,
+  } };
+  const content = encode([
+    { type: 'user/message', data: { source: { kind: 'user' }, content: [image] } },
+    { type: 'tool/call', data: { callId: 'view', name: 'read_image', arguments: { path: '/example/input.gif' } } },
+    { type: 'tool/result', data: { message: { toolCallId: 'view',
+      content: [{ type: 'text', text: 'Image loaded' }, image, { ...image,
+        attachment: { ...image.attachment, attachmentId: '../../outside.gif' } }] } } },
+  ]);
+  const [user, call, result] = detailDsh('/example/session.v4.jsonl', content, objects);
+  assert.equal(user.role, 'user');
+  assert.deepEqual(user.images, [`data:image/gif;base64,${base64}`]);
+  assert.equal(call.callId, result.callId);
+  assert.equal(result.text, 'Image loaded');
+  assert.deepEqual(result.images, user.images);
+  assert.equal(detailDsh('/example/session.v4.jsonl', content, null)[2].images, undefined);
+  assert.equal(summarizeDsh('/example/session.v4.jsonl', {}, content).turns, 1);
+  fs.writeFileSync(path.join(bucket, digest), Buffer.alloc(bytes.length));
+  assert.equal(detailDsh('/example/session.v4.jsonl', content, objects)[2].images, undefined);
+});
+
+test('session previews require both a loopback connection and a loopback Host', () => {
+  const allows = (remoteAddress, host) => requestAllowsSessionImages({ socket: { remoteAddress }, headers: { host } });
+  assert.equal(allows('::ffff:127.0.0.1', 'localhost:3789'), true);
+  assert.equal(allows('::1', '[::1]:3789'), true);
+  assert.equal(allows('192.0.2.1', 'localhost:3789'), false);
+  assert.equal(allows('127.0.0.1', 'watchcat.example:3789'), false);
+});
+
+test('keeps v4 notices and compaction checkpoints out of user turns', () => {
+  const message = (kind, text) => ({ source: { kind }, content: [{ type: 'text', text }] });
+  const notice = message('tool-jobs', 'background job demo (bash: test-command) finished [status: completed, exit code: 0].');
+  const content = encode([
+    { type: 'user/message', data: message('user', 'Run the example') },
+    { type: 'user/message', data: message('time-context', 'Synthetic timestamp') },
+    { type: 'agent/inbox/spliced', data: { inserted: [notice] } },
+    { type: 'user/message', data: notice },
+    { type: 'compaction/start', time: 1000, data: { sourceCommandId: 'manual-1', turn: null } },
+    { type: 'compaction/summary', time: 2000, data: { summary: [{ type: 'text', text: 'Checkpoint' }] } },
+    { type: 'user/message', data: message('compact-checkpoint', 'Replacement context') },
+    { type: 'compaction/end', time: 3000, data: {} },
+    { type: 'model/selection', data: { model: 'example-model', reasoningEffort: 'high' } },
+  ]);
+  const detail = detailDsh('/example/session.v4.jsonl', content);
+  assert.deepEqual(detail.map(m => m.role), ['user', 'runtime_context', 'background_task', 'compaction']);
+  assert.equal(detail[2].exitCode, 0);
+  assert.equal(detail[3].trigger, 'manual');
+  assert.equal(detail[3].durationMs, 2000);
+  assert.equal(detail[3].summary, 'Checkpoint');
+  const summary = summarizeDsh('/example/session.v4.jsonl', {}, content);
+  assert.equal(summary.turns, 1);
+  assert.equal(summary.model, 'example-model');
+  assert.equal(summary.thinkingEffort, 'high');
 });
 
 test('renders standalone goal changes and system messages without counting user turns', () => {

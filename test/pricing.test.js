@@ -638,6 +638,19 @@ test('does not duplicate legacy Codex conversation events with response items', 
   assert.deepEqual(detail.map(message => message.text), ['canonical user text', 'canonical assistant text']);
 });
 
+test('keeps Codex response messages when only the other role has legacy events', () => {
+  const rows = [
+    { type: 'event_msg', payload: { type: 'user_message', message: 'Look at the image' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant',
+      content: [{ type: 'output_text', text: 'I can see it.' }] } },
+  ];
+  const detail = detailCodex('/tmp/mixed-session.jsonl', rows.map(JSON.stringify).join('\n'));
+  assert.deepEqual(detail.map(message => [message.role, message.text]), [
+    ['user', 'Look at the image'],
+    ['assistant', 'I can see it.'],
+  ]);
+});
+
 test('renders newer Codex reasoning response items as thinking messages', () => {
   const rows = [
     { type: 'session_meta', payload: { id: 'codex-reasoning', cwd: '/tmp/project' } },
@@ -1538,6 +1551,29 @@ test('merges Codex compaction completion notifications into their compacted summ
   ]);
 });
 
+test('exposes details for an encrypted Codex checkpoint without replaying retained content', () => {
+  const rows = [
+    { type: 'response_item', payload: { type: 'compaction', encrypted_content: 'resume-checkpoint' } },
+    { type: 'compacted', payload: {
+      message: '', window_number: 2,
+      replacement_history: [{ type: 'compaction', encrypted_content: 'opaque-summary' }],
+      retained_context: {
+        user_messages: [{ text: 'retained user text' }],
+        assistant_messages: [{ text: 'retained assistant text' }],
+      },
+    } },
+    { type: 'compacted', payload: {
+      summary: '', message: 'Plaintext checkpoint.',
+    } },
+  ];
+  const detail = detailCodex('/tmp/checkpoint.jsonl', rows.map(JSON.stringify).join('\n'));
+  assert.deepEqual(detail.map(message => message.role), ['compaction', 'compaction']);
+  assert.equal(detail[0].summary, '');
+  assert.deepEqual(detail[0].checkpoint, { encrypted: true, windowNumber: 2, userMessages: 1, assistantMessages: 1 });
+  assert.equal(detail[1].summary, 'Plaintext checkpoint.');
+  assert.doesNotMatch(JSON.stringify(detail), /opaque-summary|retained (user|assistant) text/);
+});
+
 test('extracts text blocks from Codex custom tool call outputs', () => {
   const rows = [
     {
@@ -1559,6 +1595,39 @@ test('extracts text blocks from Codex custom tool call outputs', () => {
 
   assert.equal(detail[1].role, 'tool_result');
   assert.equal(detail[1].output, 'First output line\nSecond output line');
+});
+
+test('preserves inline Codex image results without exposing image blocks as text', () => {
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGNgAAIAAAUAAen63NgAAAAASUVORK5CYII=';
+  const gif = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  const image = image_url => ({ type: 'input_image', image_url });
+  const rows = [
+    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'images',
+      input: 'image((await tools.view_image({path:"/tmp/demo.png"})).image_url);' } },
+    { type: 'event_msg', payload: { type: 'item_completed',
+      item: { type: 'ImageView', id: 'view-1', path: '/tmp/demo.png' } } },
+    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'images',
+      output: [image(png), { type: 'input_text', text: 'Loaded two images.' }, image(gif)] } },
+    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'image-only',
+      output: { content: [image(png)] } } },
+    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'unsupported',
+      output: [image('/tmp/private.png'), image('https://example.com/preview.png'),
+        image('data:image/svg+xml;base64,PHN2Zy8+')] } },
+  ];
+  const [call, mixed, imageOnly, unsupported] = detailCodex(
+    '/tmp/image-session.jsonl', rows.map(JSON.stringify).join('\n'));
+
+  assert.equal(call.toolName, 'view_image');
+  assert.equal(mixed.callId, call.callId);
+  assert.equal(mixed.output, 'Loaded two images.');
+  assert.deepEqual(mixed.images, [png, gif]);
+  assert.equal(imageOnly.output, '');
+  assert.deepEqual(imageOnly.images, [png]);
+  assert.equal(unsupported.output, '');
+  assert.equal(unsupported.images, undefined);
+  const [, textOnly] = detailCodex('/tmp/image-session.jsonl', rows.map(JSON.stringify).join('\n'), false);
+  assert.equal(textOnly.output, mixed.output);
+  assert.equal(textOnly.images, undefined);
 });
 
 test('unwraps newer Codex exec wrappers into their nested tools', () => {

@@ -27,6 +27,7 @@
   .sidebar { width: 460px; min-width: 320px; overflow-y: auto; -webkit-overflow-scrolling: touch;
     border-right: 1px solid var(--border); padding: 12px;
     padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .sidebar[hidden] { display: none; }
   .main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 16px 24px;
     padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
 
@@ -149,6 +150,8 @@
   .tool-detail-label:first-child { margin-top: 0; }
   .tool-detail-value { white-space: pre-wrap; word-break: break-word; font: 12px/1.5 ui-monospace, Menlo, monospace; }
   .tool-detail-value.markdown-body { white-space: normal; font-family: inherit; }
+  .tool-images { display: grid; gap: 8px; margin-top: 6px; }
+  .tool-images img { display: block; max-width: 100%; max-height: 480px; object-fit: contain; border-radius: 6px; }
   .edit-diff { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; background: #10131a;
     font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     -webkit-text-size-adjust: none; text-size-adjust: none; }
@@ -284,6 +287,7 @@
 </head>
 <body>
 <header>
+  <button type="button" class="stats-btn" id="sidebarToggle" aria-controls="sidebar" aria-expanded="true">Hide sessions</button>
   <h1>🐱 Watchcat</h1>
   <span class="sub" id="stats"></span>
   <div class="spacer"></div>
@@ -304,6 +308,11 @@
 const MESSAGES = {
   en: {
     pageTitle: 'Watchcat · Agent Session Monitor', stats: '📊 Stats', running: 'Running', open: 'Open', idle: 'Idle',
+    hideSidebar: 'Hide sessions', showSidebar: 'Show sessions', attachment: 'Session image',
+    compactionEncrypted: 'Codex stored this summary in encrypted form. There is no readable copy in the session log.',
+    compactionNoSummary: 'Codex did not record a readable summary for this compaction.',
+    compactionWindow: 'Context window {n}', compactionRetainedUser: '{n} user messages retained',
+    compactionRetainedAssistant: '{n} assistant messages retained',
     switchLanguage: '切换到中文', switchLabel: '中文', loading: 'Loading…', selectSession: 'Select a session to view its log',
     secondsAgo: '{n}s ago', minutesAgo: '{n}m ago', hoursAgo: '{n}h ago', daysAgo: '{n}d ago',
     unknownPrice: 'Price unknown', missingPrice: 'No official API price for: {names}', noUsage: 'No billable token usage',
@@ -333,6 +342,11 @@ const MESSAGES = {
   },
   zh: {
     pageTitle: 'Watchcat · Agent 会话监控', stats: '📊 统计', running: '运行中', open: '存活', idle: '空闲',
+    hideSidebar: '收起列表', showSidebar: '展开列表', attachment: '会话图片',
+    compactionEncrypted: 'Codex 以加密形式保存了这次的摘要，会话日志中没有可读版本。',
+    compactionNoSummary: 'Codex 没有为这次压缩记录可读的摘要。',
+    compactionWindow: '上下文窗口 {n}', compactionRetainedUser: '保留 {n} 条用户消息',
+    compactionRetainedAssistant: '保留 {n} 条助手消息',
     switchLanguage: 'Switch to English', switchLabel: 'EN', loading: '加载中…', selectSession: '选择左侧会话查看日志',
     secondsAgo: '{n} 秒前', minutesAgo: '{n} 分钟前', hoursAgo: '{n} 小时前', daysAgo: '{n} 天前',
     unknownPrice: '价格未知', missingPrice: '未收录官方 API 单价：{names}', noUsage: '没有可计算的 token 用量',
@@ -371,6 +385,7 @@ const state = {
   activeSession: null,
   detailStack: [],
   collapsed: new Set(),
+  sidebarCollapsed: localStorage.getItem('watchcat-sidebar-collapsed') === 'true',
   knownProjects: new Set(),
   expandedDetails: new Set(),
   data: null,
@@ -380,6 +395,13 @@ const state = {
   statsData: null,
   statsAt: 0,
 };
+
+function renderSidebarVisibility() {
+  const toggle = document.getElementById('sidebarToggle');
+  document.getElementById('sidebar').hidden = state.sidebarCollapsed;
+  toggle.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
+  toggle.textContent = t(state.sidebarCollapsed ? 'showSidebar' : 'hideSidebar');
+}
 
 function applyLanguage() {
   document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
@@ -391,6 +413,7 @@ function applyLanguage() {
   const toggle = document.getElementById('langToggle');
   toggle.textContent = t('switchLabel');
   toggle.title = t('switchLanguage');
+  renderSidebarVisibility();
   if (state.data) renderSidebar();
   if (state.statsOpen && state.statsData) renderStats();
   else if (state.activeSession) openSession(state.activeSession, true);
@@ -416,6 +439,7 @@ const LOGOS = {
     return '<svg class="logo" viewBox="0 0 24 24" fill="#e8e8ec">' + petals + '</svg>';
   })(),
   // DeepSeek Harness: 蓝色鲸鱼
+  kimi: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#729bff" stroke-width="2.5" stroke-linecap="round"><path d="M5 4v16M19 4l-9 8 9 8"/></svg>',
   dsh: '<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#4f8cff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="M3 13c1.2 4.2 4.3 6.5 8.5 6.5 4.5 0 7.5-2.4 8.5-6.5-2.2.8-4 .6-5.4-.4-1.8-1.3-3.8-1.3-5.6 0-1.6 1.1-3.6 1.3-6 .4z"/>' +
     '<path d="M18.5 12c.2-2 1.2-3.4 2.8-4.2.2 2.3-.7 4-2.8 5.2M6.5 12V8.5M10 11V7M13.5 11.5V8.5"/>' +
@@ -435,7 +459,7 @@ const LOGOS = {
     '<path d="M19.5 12.5 C16.5 12.5 13.5 14.5 12.5 16.5"/>' +
     '<path d="M4 16.5 H14"/></svg>',
 };
-const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', dsh: 'DeepSeek Harness', cetus: 'Cetus', openclaw: 'OpenClaw', hermes: 'Hermes' };
+const SRC_NAMES = { claude: 'Claude Code', codex: 'Codex', kimi: 'Kimi Code', dsh: 'DeepSeek Harness', cetus: 'Cetus', openclaw: 'OpenClaw', hermes: 'Hermes' };
 
 function fmtTime(ts) {
   if (!ts) return '';
@@ -709,6 +733,18 @@ function renderReadContent(read, content) {
   return view;
 }
 
+function renderImages(images, label) {
+  const gallery = el('div', 'tool-images');
+  for (const src of images) {
+    const img = el('img');
+    img.alt = label;
+    img.loading = 'lazy';
+    img.src = src;
+    gallery.appendChild(img);
+  }
+  return gallery;
+}
+
 function renderActivity(messages, start, sessionFile) {
   const key = sessionFile + ':activity:' + start;
   const activity = expandable('details', 'activity', key);
@@ -789,13 +825,19 @@ function renderActivity(messages, start, sessionFile) {
     }
     const resultText = call.results.length
       ? call.results.map(r => r.readContent ?? r.output ?? r.text ?? '').join('\n') : t('noResult');
-    if (!task && (!call.use || !isDuplicatePatchResult(call.use, resultText))) {
+    const images = call.results.flatMap(r => r.images || []);
+    const showResultText = (resultText || !images.length) &&
+      (!call.use || !isDuplicatePatchResult(call.use, resultText));
+    if (!task && (showResultText || images.length)) {
       detail.appendChild(el('div', 'tool-detail-label', t('toolResult')));
-      detail.appendChild(call.use && call.use.bash
-        ? renderBash(resultText)
-        : call.use && call.use.read
-          ? renderReadContent(call.use.read, resultText)
-          : el('div', 'tool-detail-value', resultText));
+      if (showResultText) {
+        detail.appendChild(call.use && call.use.bash
+          ? renderBash(resultText)
+          : call.use && call.use.read
+            ? renderReadContent(call.use.read, resultText)
+            : el('div', 'tool-detail-value', resultText));
+      }
+      if (images.length) detail.appendChild(renderImages(images, name));
     }
     item.appendChild(detail);
     list.appendChild(item);
@@ -1663,13 +1705,23 @@ async function openSession(s, keepScroll) {
         if (m.ts) details.push(fmtTime(m.ts));
         const label = t('compacted') + (details.length ? ' · ' + details.join(' · ') : '');
         let box;
-        if (m.summary) {
+        if (m.summary || m.checkpoint) {
           box = expandable('details', 'msg compaction', s.file + ':compaction:' + i);
           const summary = el('summary', 'compaction-summary');
           summary.appendChild(el('span', 'compaction-label', label));
           box.appendChild(summary);
           const content = el('div', 'compaction-content');
-          content.appendChild(renderMarkdown(m.summary, 'markdown-body'));
+          if (m.summary) {
+            content.appendChild(renderMarkdown(m.summary, 'markdown-body'));
+          } else {
+            const checkpoint = m.checkpoint;
+            content.appendChild(el('div', null, t(checkpoint.encrypted ? 'compactionEncrypted' : 'compactionNoSummary')));
+            const metadata = [];
+            if (checkpoint.windowNumber != null) metadata.push(t('compactionWindow', { n: checkpoint.windowNumber }));
+            if (checkpoint.userMessages != null) metadata.push(t('compactionRetainedUser', { n: checkpoint.userMessages }));
+            if (checkpoint.assistantMessages != null) metadata.push(t('compactionRetainedAssistant', { n: checkpoint.assistantMessages }));
+            if (metadata.length) content.appendChild(el('div', 'meta', metadata.join(' · ')));
+          }
           box.appendChild(content);
         } else {
           box = el('div', 'msg compaction');
@@ -1682,7 +1734,8 @@ async function openSession(s, keepScroll) {
       const box = el('div', 'msg ' + m.role);
       if (m.role === 'divider') { box.textContent = m.text; main.appendChild(box); i++; continue; }
       box.appendChild(el('div', 'meta', (roleNames[m.role] || m.role) + (m.ts ? ' · ' + fmtTime(m.ts) : '')));
-      box.appendChild(m.role === 'user' ? renderUserMarkdown(m.text) : renderMarkdown(m.text));
+      if (m.text || !m.images?.length) box.appendChild(m.role === 'user' ? renderUserMarkdown(m.text) : renderMarkdown(m.text));
+      if (m.images?.length) box.appendChild(renderImages(m.images, t('attachment')));
       main.appendChild(box);
       i++;
     }
@@ -1709,6 +1762,11 @@ document.getElementById('langToggle').onclick = () => {
   applyLanguage();
 };
 document.getElementById('statsToggle').onclick = () => state.statsOpen ? closeStats() : openStats();
+document.getElementById('sidebarToggle').onclick = () => {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  localStorage.setItem('watchcat-sidebar-collapsed', String(state.sidebarCollapsed));
+  renderSidebarVisibility();
+};
 applyLanguage();
 if (location.hash === '#stats') openStats();
 
